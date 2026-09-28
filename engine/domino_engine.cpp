@@ -1071,10 +1071,6 @@ static std::string runAnalyze(const JValue& req) {
     int totalOppCards = distributed - static_cast<int>(myHand.size()) -
                         static_cast<int>(boardIds.size());
     if (totalOppCards < 0) totalOppCards = 0;
-    if (req.find("totalOppCards")) {
-        int given = req.find("totalOppCards")->asInt(totalOppCards);
-        if (given >= 0) totalOppCards = given;
-    }
 
     int numOpp = numPlayers - 1;
     while (passElim.size() < static_cast<size_t>(numOpp)) passElim.push_back({});
@@ -1107,8 +1103,11 @@ static std::string runAnalyze(const JValue& req) {
     }
     int heldTotal = 0;
     for (const auto& hv : held) heldTotal += static_cast<int>(hv.size());
-    if (heldTotal > totalOppCards)
-        throw std::runtime_error("atribusi kartu melebihi jumlah kartu lawan");
+    // Sanity only: attributed tiles came from the board, so the true invariant
+    // is heldTotal <= boardIds.size(). The old check compared *played* opponent
+    // tiles against *hidden* opponent tiles — apples vs oranges.
+    if (heldTotal > static_cast<int>(boardIds.size()))
+        throw std::runtime_error("atribusi kartu melebihi kartu di papan");
 
     bool hasPassData = false;
     for (const auto& el : passElim)
@@ -1665,6 +1664,40 @@ static std::string runSelftest() {
             if (pass && totalDraws == 0) detail += " (info: 100 gim tanpa satu pun nyamber)";
         } catch (const std::exception& e) { pass = false; detail = e.what(); }
         checks.push_back({"cangkul_mode", pass, detail});
+    }
+
+    // 10. end-game attribution: many attributed tiles must not break analysis.
+    //     Regression: the old sanity check compared *played* opponent tiles
+    //     (heldTotal) against *hidden* opponent tiles (totalOppCards) and threw
+    //     "atribusi kartu melebihi jumlah kartu lawan" on valid end-games.
+    {
+        bool pass = true;
+        std::string detail = "end-game: 12 kartu teratribusi lawan, analisis tetap jalan";
+        try {
+            std::ostringstream payload;
+            payload << "{\"cmd\":\"analyze\",\"numPlayers\":4,\"cardsPerPlayer\":7,"
+                    << "\"numSims\":200,\"seed\":7,\"leftEnd\":3,\"rightEnd\":0,"
+                    << "\"myHand\":[\"0-0\"],"
+                    << "\"played\":[\"1-2\",\"1-3\",\"1-4\",\"1-5\",\"1-6\","
+                       "\"2-3\",\"2-4\",\"2-5\",\"2-6\",\"3-4\",\"4-5\",\"5-6\","
+                       "\"0-1\",\"0-2\",\"0-3\",\"0-4\",\"0-5\",\"0-6\",\"3-6\"],"
+                    << "\"playedBy\":[\"opp1\",\"opp1\",\"opp1\",\"opp1\",\"opp1\","
+                       "\"opp2\",\"opp2\",\"opp2\",\"opp2\",\"opp2\",\"opp2\","
+                       "\"opp3\",\"me\",\"me\",\"me\",\"me\",\"me\",\"me\",\"me\"],"
+                    << "\"opponents\":[{},{},{}]}";
+            JValue resp = JParser(runAnalyze(JParser(payload.str()).parse())).parse();
+            if (resp.find("totalOppCards")->asInt(-1) != 8) { pass = false; detail = "totalOppCards salah"; }
+            if (pass && resp.find("boneyardCount")->asInt(-1) != 0) { pass = false; detail = "boneyardCount salah"; }
+            if (pass) {
+                const std::vector<JValue>& opps = resp.find("opponents")->arr;
+                if (opps.size() != 3 ||
+                    opps[0].find("heldKnown")->asInt(-1) != 5 ||
+                    opps[1].find("heldKnown")->asInt(-1) != 6 ||
+                    opps[2].find("heldKnown")->asInt(-1) != 1) { pass = false; detail = "heldKnown salah"; }
+            }
+            if (pass && resp.find("moves")->arr.empty()) { pass = false; detail = "moves kosong"; }
+        } catch (const std::exception& e) { pass = false; detail = e.what(); }
+        checks.push_back({"atribusi_endgame", pass, detail});
     }
 
     std::ostringstream out;

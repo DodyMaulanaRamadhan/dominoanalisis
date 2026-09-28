@@ -187,6 +187,34 @@ class TestServerLive(unittest.TestCase):
         self.assertEqual(data["opponents"][0]["heldKnown"], 1)
         self.assertEqual(data["opponents"][1]["heldKnown"], 1)
 
+    def test_analyze_endgame_attribution(self):
+        # Regresi: end-game dengan 12 kartu teratribusi lawan dulu melempar
+        # "atribusi kartu melebihi jumlah kartu lawan" — padahal data sah.
+        if not ds.ENGINE.exists():
+            self.skipTest("engine belum di-build")
+        payload = {
+            "cmd": "analyze", "numPlayers": 4, "cardsPerPlayer": 7,
+            "numSims": 100, "seed": 7, "leftEnd": 3, "rightEnd": 0,
+            "myHand": ["0-0"],
+            "played": ["1-2", "1-3", "1-4", "1-5", "1-6", "2-3", "2-4",
+                       "2-5", "2-6", "3-4", "4-5", "5-6", "0-1", "0-2",
+                       "0-3", "0-4", "0-5", "0-6", "3-6"],
+            "playedBy": ["opp1", "opp1", "opp1", "opp1", "opp1",
+                         "opp2", "opp2", "opp2", "opp2", "opp2", "opp2",
+                         "opp3", "me", "me", "me", "me", "me", "me", "me"],
+            "nextSeat": 1, "opponents": [{}, {}, {}],
+        }
+        status, data = http_post(self.port, "/api/analyze", payload)
+        self.assertEqual(status, 200)
+        self.assertTrue(data["ok"])
+        self.assertTrue(data["hasAttribution"])
+        self.assertEqual(data["totalOppCards"], 8)
+        self.assertEqual(data["boneyardCount"], 0)
+        self.assertEqual(data["opponents"][0]["heldKnown"], 5)
+        self.assertEqual(data["opponents"][1]["heldKnown"], 6)
+        self.assertEqual(data["opponents"][2]["heldKnown"], 1)
+        self.assertGreater(len(data["moves"]), 0)
+
     def test_played_by_contradiction_rejected(self):
         # opp1 yang di-PASS atas angka 3 tidak mungkin memainkan 3-5
         payload = {
