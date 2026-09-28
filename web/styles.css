@@ -335,3 +335,8 @@ header p{color:#8b949e;font-size:0.62rem;margin-top:2px;}
 .live-chip{display:none;font-size:0.55rem;font-weight:800;color:#3fb950;background:rgba(63,185,80,0.12);border:1px solid #3fb950;border-radius:8px;padding:1px 7px;margin-left:6px;vertical-align:middle;}
 .live-chip.active{display:inline-block;animation:pulse 1.6s infinite;}
 .btn-analyze.running{background:linear-gradient(135deg,#da3633,#f85149);}
+
+/* ---- v3.2: header live indicator ---- */
+.header-live{display:none;font-size:0.55rem;font-weight:800;color:#3fb950;background:rgba(63,185,80,0.12);border:1px solid #3fb950;border-radius:8px;padding:1px 7px;margin-left:6px;vertical-align:middle;}
+.header-live.on{display:inline-block;color:#0d1117;background:#3fb950;border-color:#3fb950;animation:pulse 1.6s infinite;}
+.header-live.paused{display:inline-block;color:#8b949e;background:#161b22;border-color:#30363d;}
