@@ -632,6 +632,8 @@ struct SimResult {
     std::vector<int> oppPassCounts;
     int tilesTotal = 0;   // hands + boneyard (unplayed tiles)
     int onBoard = 0;      // tiles played onto the chain during the sim
+    int drawsMade = 0;    // cangkul draws taken during the sim
+    std::vector<int> boneyardFinal; // tiles still dead when the sim ended
     bool conserved = false; // tilesTotal + onBoard == tiles at deal time
 };
 
@@ -657,7 +659,7 @@ static SimResult simulateGame(const std::vector<int>& myHandIn, int leIn, int re
                               int numPlayers, const Deal& deal, Rng& rng,
                               const NumMap& baseMap, int nextSeat,
                               const std::vector<AiStyle>& styles, int tightOppIdx,
-                              const std::string& deadlockRule, bool tieWin) {
+                              const std::string& deadlockRule, bool tieWin, bool cangkul) {
     SimResult res;
     int numOpp = numPlayers - 1;
     std::vector<int> myH = myHandIn;
@@ -685,6 +687,7 @@ static SimResult simulateGame(const std::vector<int>& myHandIn, int leIn, int re
         res.tilesTotal = static_cast<int>(myH.size());
         for (const auto& h : oppHands) res.tilesTotal += static_cast<int>(h.size());
         res.tilesTotal += static_cast<int>(bone.size());
+        res.boneyardFinal = bone;
         res.conserved = (res.tilesTotal + res.onBoard == tilesAtDeal);
         return res;
     };
@@ -694,12 +697,13 @@ static SimResult simulateGame(const std::vector<int>& myHandIn, int leIn, int re
         ++turn;
         if (cur == 0) {
             auto mv = aiChooseMove(myH, le, re, myDom, nm, rng, AiStyle::MIXED, true);
-            if (!mv && !bone.empty()) {
+            if (!mv && cangkul && !bone.empty()) {
                 // cangkul: draw until playable or boneyard empty
                 while (!mv && !bone.empty()) {
                     int idx = rng.nextInt(static_cast<int>(bone.size()));
                     int id = bone[idx];
                     bone[idx] = bone.back(); bone.pop_back();
+                    ++res.drawsMade;
                     myH.push_back(id);
                     nm.mine[g_tiles[id].a]++;
                     nm.mine[g_tiles[id].b]++;
@@ -731,11 +735,12 @@ static SimResult simulateGame(const std::vector<int>& myHandIn, int leIn, int re
                                           ? styles[oi] : AiStyle::MIXED);
                 Dominance od = analyzeDominance(oppHands[oi]);
                 auto mv = aiChooseMove(oppHands[oi], le, re, od, nm, rng, st, !tight);
-                if (!mv && !bone.empty()) {
+                if (!mv && cangkul && !bone.empty()) {
                     while (!mv && !bone.empty()) {
                         int idx = rng.nextInt(static_cast<int>(bone.size()));
                         int id = bone[idx];
                         bone[idx] = bone.back(); bone.pop_back();
+                        ++res.drawsMade;
                         oppHands[oi].push_back(id);
                         mv = aiChooseMove(oppHands[oi], le, re, od, nm, rng, st, !tight);
                     }
@@ -1013,6 +1018,7 @@ static std::string runAnalyze(const JValue& req) {
     if (nextSeat < 0 || nextSeat >= numPlayers)
         throw std::runtime_error("nextSeat harus 0.." + std::to_string(numPlayers - 1));
     bool tieWin = (tieRule == "win");
+    bool cangkul = req.find("cangkul") ? req.find("cangkul")->asBool(true) : true;
 
     std::vector<int> myHand = parseTileList(req.at("myHand"), "myHand");
     std::vector<int> boardIds = parseTileList(req.at("played"), "played");
@@ -1126,6 +1132,7 @@ static std::string runAnalyze(const JValue& req) {
          << ",\"adversarial\":" << jbool(adversarial)
          << ",\"deadlockRule\":" << jstr(deadlockRule)
          << ",\"tieRule\":" << jstr(tieRule)
+         << ",\"cangkul\":" << jbool(cangkul)
          << ",\"isFirstMove\":" << jbool(isFirstMove)
          << ",\"hasPassData\":" << jbool(hasPassData)
          << ",\"hasAttribution\":" << jbool(hasAttrib)
@@ -1190,8 +1197,10 @@ static std::string runAnalyze(const JValue& req) {
         int wins = 0, winByEmpty = 0, winByValue = 0, deadlockWins = 0, blockedGames = 0;
         long long totalMyVal = 0, totalOppMinVal = 0, totalDomControl = 0, totalOppPasses = 0;
         std::array<long long, 28> dangerCnt{};
+        std::array<long long, 28> deadCnt{}; // boneyard-membership frequency (v3.1)
         long long losses = 0;
         bool conserved = true;
+        long long totalDraws = 0;
 
         for (int s = 0; s < numSims; ++s) {
             Deal deal = dealConstrained(unknown, numOpp, totalOppCards, dealElim, held, master);
@@ -1202,7 +1211,7 @@ static std::string runAnalyze(const JValue& req) {
                 styles[p] = static_cast<AiStyle>(1 + ((s + p) % 3));
             int tightIdx = adversarial ? firstResponder : -1;
             SimResult sim = simulateGame(nH, nL, nR, numPlayers, deal, gameRng, simBase,
-                                         nextSeat, styles, tightIdx, deadlockRule, tieWin);
+                                         nextSeat, styles, tightIdx, deadlockRule, tieWin, cangkul);
             if (!sim.conserved) conserved = false;
             if (sim.iWin) {
                 ++wins;
@@ -1215,6 +1224,8 @@ static std::string runAnalyze(const JValue& req) {
                 ++losses;
                 for (int id : sim.oppMoveIds) dangerCnt[id]++;
             }
+            for (int id : sim.boneyardFinal) deadCnt[id]++;
+            totalDraws += sim.drawsMade;
             totalMyVal += sim.myVal;
             if (sim.blocked) ++blockedGames;
             if (!sim.oppVals.empty())
@@ -1251,6 +1262,7 @@ static std::string runAnalyze(const JValue& req) {
         double avgOppMinVal = numSims > 0 ? static_cast<double>(totalOppMinVal) / numSims : 0.0;
         double avgOppPasses = numSims > 0 ? static_cast<double>(totalOppPasses) / numSims : 0.0;
         double avgDomControl = numSims > 0 ? static_cast<double>(totalDomControl) / numSims : 0.0;
+        double avgDraws = numSims > 0 ? static_cast<double>(totalDraws) / numSims : 0.0;
 
         // engine-side ranking (single source of truth — mirrored to UI)
         double rankScore = winRate * 100.0 +
@@ -1283,6 +1295,7 @@ static std::string runAnalyze(const JValue& req) {
         out << ",\"riskScore\":" << jnum(riskScore, 3);
         out << ",\"topDanger\":[" << dangerJson << "]";
         out << ",\"avgOppPasses\":" << jnum(avgOppPasses, 3);
+        out << ",\"avgDraws\":" << jnum(avgDraws, 3);
         out << ",\"avgDomControl\":" << jnum(avgDomControl, 3);
         out << ",\"conserved\":" << jbool(conserved);
         out << ",\"domSupportScore\":" << h.domSupportScore;
@@ -1329,13 +1342,60 @@ static std::string runAnalyze(const JValue& req) {
                          return x.first > y.first;
                      });
 
+    // ---- dead-tile (sisa mati) probabilities (v3.1) -----------------------
+    // A dedicated Monte-Carlo over constraint-aware deals only (cheap — no
+    // game simulation): each tile's probability of ending up in the boneyard.
+    // Without constraints P(dead) is uniform ((pool-hand)/pool); PASS and
+    // attribution constraints push violating tiles into the boneyard, so the
+    // real distribution is scenario-dependent — exactly what MC captures.
+    std::ostringstream deadOut;
+    if (!unknown.empty()) {
+        std::array<long long, 28> deadAgg{};
+        std::array<long long, 7> deadNumAgg{};
+        int deadSims = std::min(numSims, 2000);
+        for (int s = 0; s < deadSims; ++s) {
+            Deal deal = dealConstrained(unknown, numOpp, totalOppCards, dealElim, held, master);
+            for (int id : deal.boneyard) { deadAgg[id]++; }
+        }
+        std::vector<std::pair<int, double>> dead;
+        for (int id = 0; id < 28; ++id)
+            if (deadAgg[id] > 0)
+                dead.emplace_back(id, static_cast<double>(deadAgg[id]) / deadSims);
+        std::stable_sort(dead.begin(), dead.end(),
+                         [](const std::pair<int, double>& x, const std::pair<int, double>& y) {
+                             return x.second > y.second;
+                         });
+        deadOut << ",\"deadTiles\":[";
+        for (size_t k = 0; k < dead.size(); ++k) {
+            if (k) deadOut << ",";
+            const Tile& t = g_tiles[dead[k].first];
+            deadOut << "{\"key\":" << jstr(t.key)
+                    << ",\"a\":" << t.a << ",\"b\":" << t.b
+                    << ",\"prob\":" << jnum(dead[k].second, 4) << "}";
+        }
+        deadOut << "]";
+        double boneCount = static_cast<double>(unknown.size()) - static_cast<double>(totalOppCards);
+        if (boneCount > 0)
+            for (int id = 0; id < 28; ++id)
+                deadNumAgg[g_tiles[id].a] += deadAgg[id];
+        deadOut << ",\"deadByNumber\":[";
+        for (int n = 0; n <= 6; ++n) {
+            if (n) deadOut << ",";
+            double expected = boneCount > 0 ? static_cast<double>(deadNumAgg[n]) / deadSims : 0.0;
+            deadOut << jnum(expected, 3);
+        }
+        deadOut << "]";
+    }
+
     std::ostringstream out;
     out << head.str();
     for (size_t k = 0; k < moveOuts.size(); ++k) {
         if (k) out << ",";
         out << moveOuts[k].second;
     }
-    out << "]}";
+    out << "]";
+    out << deadOut.str();
+    out << "}";
     return out.str();
 }
 
@@ -1480,7 +1540,7 @@ static std::string runSelftest() {
                 NumMap base = buildNumMap(myHand, {});
                 std::vector<AiStyle> styles = {AiStyle::BLOCKER, AiStyle::HOARDER, AiStyle::DUMPER};
                 SimResult sim = simulateGame(myHand, 3, 5, 4, deal, gameRng, base, 1, styles, -1,
-                                             "lowest", true);
+                                             "lowest", true, true);
                 if (sim.myTiles == 0 && sim.myVal != 0) pass = false;
                 if (!sim.conserved) { pass = false; detail = "konservasi tile dalam sim gagal"; }
                 if (sim.iWin) ++wins;
@@ -1509,7 +1569,7 @@ static std::string runSelftest() {
                 NumMap base = buildNumMap(myHand, {});
                 std::vector<AiStyle> styles = {AiStyle::MIXED};
                 SimResult sim = simulateGame(myHand, -1, -1, 2, deal, gameRng, base, 1, styles, -1,
-                                             "lowest", true);
+                                             "lowest", true, true);
                 if (!sim.conserved) { pass = false; detail = "konservasi cangkul gagal"; }
             }
         } catch (const std::exception& e) { pass = false; detail = e.what(); }
@@ -1569,6 +1629,42 @@ static std::string runSelftest() {
             }
         } catch (const std::exception& e) { pass = false; detail = e.what(); }
         checks.push_back({"aturan_adu", pass, detail});
+    }
+
+    // 9. cangkul mode: no draws when disabled; conservation with/without
+    {
+        bool pass = true;
+        std::string detail = "cangkul=false -> 0 nyamber; cangkul=true -> konservasi";
+        try {
+            Rng rng(555ULL);
+            std::vector<int> myHand = {tileId("0-0"), tileId("1-2"), tileId("3-3"),
+                                       tileId("4-5"), tileId("5-6"), tileId("6-6"), tileId("2-4")};
+            std::vector<int> unknown;
+            for (int id = 0; id < 28; ++id)
+                if (std::find(myHand.begin(), myHand.end(), id) == myHand.end()) unknown.push_back(id);
+            std::vector<std::vector<int>> elim(1), held(1);
+            NumMap base = buildNumMap(myHand, {});
+            std::vector<AiStyle> styles = {AiStyle::MIXED};
+
+            Deal deal = dealConstrained(unknown, 1, 7, elim, held, rng);
+            Rng gameRng(rng.next());
+            SimResult sim = simulateGame(myHand, -1, -1, 2, deal, gameRng, base, 1, styles, -1,
+                                         "lowest", true, false);
+            if (sim.drawsMade != 0) { pass = false; detail = "cangkul=false tapi ada nyamber"; }
+            if (!sim.conserved) { pass = false; detail = "konservasi gagal (tanpa cangkul)"; }
+
+            int totalDraws = 0;
+            for (int s = 0; s < 100 && pass; ++s) {
+                Deal d2 = dealConstrained(unknown, 1, 7, elim, held, rng);
+                Rng grng(rng.next());
+                SimResult s2 = simulateGame(myHand, -1, -1, 2, d2, grng, base, 1, styles, -1,
+                                            "lowest", true, true);
+                totalDraws += s2.drawsMade;
+                if (!s2.conserved) { pass = false; detail = "konservasi gagal (dengan cangkul)"; }
+            }
+            if (pass && totalDraws == 0) detail += " (info: 100 gim tanpa satu pun nyamber)";
+        } catch (const std::exception& e) { pass = false; detail = e.what(); }
+        checks.push_back({"cangkul_mode", pass, detail});
     }
 
     std::ostringstream out;

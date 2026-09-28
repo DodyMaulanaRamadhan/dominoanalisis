@@ -149,6 +149,27 @@ class TestServerLive(unittest.TestCase):
             self.assertLessEqual(mv["winLo"], mv["winRate"] + 1e-9)
             self.assertGreaterEqual(mv["winHi"], mv["winRate"] - 1e-9)
 
+    def test_analyze_cangkul_false_and_dead_tiles(self):
+        if not ds.ENGINE.exists():
+            self.skipTest("engine belum di-build")
+        payload = {
+            "cmd": "analyze", "numPlayers": 4, "cardsPerPlayer": 6,
+            "numSims": 100, "seed": 11, "leftEnd": -1, "rightEnd": -1,
+            "myHand": ["0-0", "1-2", "3-4", "5-6"], "played": [],
+            "cangkul": False, "nextSeat": 1, "opponents": [{}, {}, {}],
+        }
+        status, data = http_post(self.port, "/api/analyze", payload)
+        self.assertEqual(status, 200)
+        self.assertTrue(data["ok"])
+        self.assertFalse(data["cangkul"])
+        self.assertGreater(data["boneyardCount"], 0)
+        self.assertGreater(len(data["deadTiles"]), 0)
+        self.assertEqual(len(data["deadByNumber"]), 7)
+        probs = [d["prob"] for d in data["deadTiles"]]
+        self.assertEqual(probs, sorted(probs, reverse=True))
+        # 28 - 4*6 = 4 kartu sisa -> ekspektasi total kartu mati = 4
+        self.assertAlmostEqual(sum(data["deadByNumber"]), 4.0, places=1)
+
     def test_analyze_playedBy(self):
         if not ds.ENGINE.exists():
             self.skipTest("engine belum di-build")
