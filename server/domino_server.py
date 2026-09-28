@@ -22,6 +22,7 @@ Port/host overrides:
 """
 from __future__ import annotations
 
+import hmac
 import json
 import os
 import pathlib
@@ -41,6 +42,17 @@ if PORT <= 0:
     PORT = 2024  # PORT=0 biasanya artefak environment, bukan niat pengguna
 APP_TOKEN = os.environ.get("APP_TOKEN", "").strip()
 MAX_BODY = 1 << 20  # 1 MiB
+
+# Dikirim di SETIAP respons (static & JSON): anti-sniff, anti-clickjacking,
+# CSP minimal — app hanya memuat aset same-origin tanpa inline script.
+SECURITY_HEADERS = {
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+    "Content-Security-Policy": (
+        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; object-src 'none'"
+    ),
+}
 
 if sys.platform == "win32":
     ENGINE = BIN_DIR / "domino_engine.exe"
@@ -69,11 +81,13 @@ def normalize_tile_list(value) -> tuple[list[str] | None, str]:
     if not isinstance(value, list):
         return None, "harus array"
     out: list[str] = []
-    for item in value:
+    for idx, item in enumerate(value):
         key = normalize_key(item)
         if key is None:
+            # Jangan echo isi `item`: pesan error bisa direfleksikan ke
+            # innerHTML oleh klien (XSS). Sebutkan posisinya saja.
             return None, (
-                f"format kartu '{item}' tidak dikenal — gunakan angka 0..6, "
+                f"format kartu tidak dikenal (elemen ke-{idx + 1}) — gunakan angka 0..6, "
                 "contoh yang benar: '3-5' atau '6-1' (urutan bebas)"
             )
         out.append(key)
@@ -94,7 +108,11 @@ def engine_command(payload: dict) -> dict:
     except subprocess.TimeoutExpired:
         return {"ok": False, "error": "engine timeout (>300s)"}
     if proc.returncode != 0:
-        return {"ok": False, "error": f"engine exit {proc.returncode}: {proc.stderr.decode(errors='replace')[:400]}"}
+        # Detail crash hanya untuk log server — jangan bocorkan ke klien.
+        print(f"[engine] exit {proc.returncode}: "
+              f"{proc.stderr.decode(errors='replace')[:400]}", file=sys.stderr)
+        return {"ok": False,
+                "error": f"engine error (exit {proc.returncode}) — detail ada di log server"}
     try:
         return json.loads(proc.stdout.decode("utf-8"))
     except json.JSONDecodeError:
@@ -119,6 +137,15 @@ def validate_analyze(req: dict) -> str | None:
         return "cardsPerPlayer tidak wajar"
     if n * c > 28:
         return "total kartu melebihi 28"
+
+    # numSims = work factor per request — wajib dibatasi (anti-DoS CPU)
+    try:
+        nsims = int(req.get("numSims", 1000))
+    except (TypeError, ValueError):
+        return "numSims harus angka 1..10000"
+    if not (1 <= nsims <= 10000):
+        return "numSims harus angka 1..10000"
+    req["numSims"] = nsims
 
     hand = req.get("myHand", [])
     played = req.get("played", [])
@@ -170,7 +197,7 @@ def remaining_pieces(req: dict) -> dict:
     played = set(req.get("played", []))
     pieces = []
     for a in range(7):
-        for b in range(a, 8):
+        for b in range(a, 7):
             key = f"{a}-{b}"
             if key not in hand and key not in played:
                 pieces.append(key)
@@ -187,12 +214,17 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        for k, v in SECURITY_HEADERS.items():
+            self.send_header(k, v)
         self.end_headers()
         self.wfile.write(body)
 
     def _send_static(self, rel: str) -> None:
+        web_root = WEB_DIR.resolve()
         target = (WEB_DIR / rel).resolve()
-        if not str(target).startswith(str(WEB_DIR.resolve())):
+        # is_relative_to: rel benar-benar di dalam web/ (aman utk sibling
+        # "web*" & symlink keluar — cek prefix string lama bisa dilewati)
+        if not target.is_relative_to(web_root):
             self._send_json({"ok": False, "error": "forbidden"}, HTTPStatus.FORBIDDEN)
             return
         if not target.is_file():
@@ -214,10 +246,24 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-cache")
+        for k, v in SECURITY_HEADERS.items():
+            self.send_header(k, v)
         self.end_headers()
         self.wfile.write(body)
 
     def _read_json_body(self) -> dict | None:
+        # CORS "simple request" (Content-Type text/plain) dikirim browser tanpa
+        # preflight — tolak di sini agar halaman lintas-situs tak bisa memicu
+        # /api (CSRF/DoS drive-by ke localhost).
+        ctype = self.headers.get("Content-Type", "").split(";")[0].strip().lower()
+        if ctype != "application/json":
+            return None
+        # Origin yang ada tapi beda dengan Host = permintaan lintas-situs.
+        origin = self.headers.get("Origin")
+        if origin is not None:
+            origin_netloc = origin.split("://", 1)[-1].rstrip("/").lower()
+            if origin_netloc != self.headers.get("Host", "").lower():
+                return None
         try:
             length = int(self.headers.get("Content-Length", "0"))
         except ValueError:
@@ -226,14 +272,18 @@ class Handler(BaseHTTPRequestHandler):
             return None
         try:
             return json.loads(self.rfile.read(length).decode("utf-8"))
-        except (json.JSONDecodeError, UnicodeDecodeError):
+        except (json.JSONDecodeError, UnicodeDecodeError, RecursionError):
             return None
 
     def _authorized(self) -> bool:
         """APP_TOKEN mode: POST /api/* requires the right X-App-Token."""
         if not APP_TOKEN:
             return True
-        return self.headers.get("X-App-Token", "") == APP_TOKEN
+        # compare_digest: perbandingan waktu-konstan (tahan timing-oracle)
+        return hmac.compare_digest(
+            self.headers.get("X-App-Token", "").encode("utf-8"),
+            APP_TOKEN.encode("utf-8"),
+        )
 
     # ---- HTTP methods --------------------------------------------------
     def do_GET(self) -> None:  # noqa: N802
@@ -271,6 +321,9 @@ class Handler(BaseHTTPRequestHandler):
         body = self._read_json_body()
         if body is None:
             self._send_json({"ok": False, "error": "body JSON tidak valid"}, HTTPStatus.BAD_REQUEST)
+            return
+        if not isinstance(body, dict):
+            self._send_json({"ok": False, "error": "body harus objek JSON"}, HTTPStatus.BAD_REQUEST)
             return
 
         if path == "/api/analyze":

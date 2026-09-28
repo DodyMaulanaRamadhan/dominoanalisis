@@ -20,11 +20,15 @@ sys.path.insert(0, str(ROOT / "server"))
 import domino_server as ds  # noqa: E402
 
 
-def http_post(port: int, path: str, payload: dict, token: str = "") -> tuple[int, dict]:
+def http_post(port: int, path: str, payload: dict, token: str = "",
+               ctype: str = "application/json", raw: bytes | None = None,
+               extra_headers: dict | None = None) -> tuple[int, dict]:
+    data = raw if raw is not None else json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
         f"http://127.0.0.1:{port}{path}",
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json",
+        data=data,
+        headers={"Content-Type": ctype,
+                 **(extra_headers or {}),
                  **({"X-App-Token": token} if token else {})},
         method="POST",
     )
@@ -33,6 +37,11 @@ def http_post(port: int, path: str, payload: dict, token: str = "") -> tuple[int
             return res.status, json.loads(res.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         return e.code, json.loads(e.read().decode("utf-8"))
+
+
+def http_get_raw(port: int, path: str) -> tuple[int, dict, bytes]:
+    with urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=30) as res:
+        return res.status, dict(res.headers), res.read()
 
 
 def http_get(port: int, path: str) -> tuple[int, dict]:
@@ -58,6 +67,14 @@ class TestNormalization(unittest.TestCase):
         self.assertIsNone(ds.normalize_key(""))
         self.assertIsNone(ds.normalize_key("1-2-3"))
         self.assertIsNone(ds.normalize_key(35))  # non-string rejected
+
+    def test_error_message_never_echoes_raw_input(self):
+        # payload HTML di myHand tidak boleh muncul mentah di pesan error
+        # (dulu direfleksikan ke innerHTML klien = XSS)
+        norm, err = ds.normalize_tile_list(["<img src=x onerror=alert(1)>"])
+        self.assertIsNone(norm)
+        self.assertNotIn("<img", err)
+        self.assertIn("elemen ke-1", err)
 
 
 class TestValidate(unittest.TestCase):
@@ -94,6 +111,18 @@ class TestValidate(unittest.TestCase):
     def test_overlap_rejected(self):
         bad = self.base_ok(); bad["played"] = ["1-6"]
         self.assertIsNotNone(ds.validate_analyze(bad))
+
+    def test_numSims_bounds(self):
+        # anti-DoS: wajib 1..10000; hilang -> default 1000; bukan angka -> tolak
+        self.assertIsNone(ds.validate_analyze(self.base_ok()))
+        lo = self.base_ok(); lo["numSims"] = 1
+        self.assertIsNone(ds.validate_analyze(lo))
+        hi = self.base_ok(); hi["numSims"] = 10000
+        self.assertIsNone(ds.validate_analyze(hi))
+        for v in (10001, 0, -5, 10**12, "banyak", None):
+            bad = self.base_ok(); bad["numSims"] = v
+            self.assertIsNotNone(ds.validate_analyze(bad),
+                                 f"numSims={v!r} harus ditolak")
 
 
 class TestServerLive(unittest.TestCase):
@@ -229,6 +258,76 @@ class TestServerLive(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertTrue(data["ok"])
         self.assertFalse(data["hasAttribution"])
+
+    # ---- kontrak keamanan (audit) -------------------------------------
+    def simple_payload(self, **over):
+        p = {"cmd": "analyze", "numPlayers": 2, "cardsPerPlayer": 3,
+             "numSims": 1, "seed": 1, "leftEnd": -1, "rightEnd": -1,
+             "myHand": ["0-1", "0-2"], "played": [], "nextSeat": 1,
+             "deadlockRule": "lowest", "tieRule": "win",
+             "opponents": [{"passes": 0, "eliminated": []}]}
+        p.update(over)
+        return p
+
+    def test_security_headers_present(self):
+        for path in ("/", "/api/health"):
+            status, headers, _body = http_get_raw(self.port, path)
+            self.assertEqual(status, 200)
+            self.assertEqual(headers.get("X-Content-Type-Options"), "nosniff")
+            self.assertEqual(headers.get("Referrer-Policy"), "no-referrer")
+            self.assertIn("frame-ancestors 'none'",
+                          headers.get("Content-Security-Policy", ""))
+
+    def test_reject_non_json_content_type(self):
+        # vektor CSRF "simple request" browser lintas-situs
+        for ctype in ("text/plain", "application/x-www-form-urlencoded"):
+            status, data = http_post(self.port, "/api/analyze",
+                                     self.simple_payload(), ctype=ctype)
+            self.assertEqual(status, 400, ctype)
+            self.assertFalse(data["ok"])
+
+    def test_reject_cross_origin(self):
+        status, data = http_post(self.port, "/api/analyze", self.simple_payload(),
+                                 extra_headers={"Origin": "http://evil.com"})
+        self.assertEqual(status, 400)
+        # positif-kontrol: origin == Host tetap diterima
+        status, data = http_post(self.port, "/api/analyze", self.simple_payload(),
+                                 extra_headers={"Origin": f"http://127.0.0.1:{self.port}"})
+        self.assertEqual(status, 200)
+        self.assertTrue(data["ok"])
+
+    def test_numSims_out_of_range_rejected(self):
+        for v in (10001, 10**12, 0):
+            status, data = http_post(self.port, "/api/analyze",
+                                     self.simple_payload(numSims=v))
+            self.assertEqual(status, 400, f"numSims={v}")
+
+    def test_malformed_bodies_clean_400(self):
+        # body non-dict & JSON bersarang dalam -> 400 rapi, bukan koneksi putus
+        status, data = http_post(self.port, "/api/analyze", None, raw=b"[1,2,3]")
+        self.assertEqual(status, 400)
+        self.assertFalse(data["ok"])
+        deep = b'{"cmd":"analyze","x":' + b"[" * 5000 + b"]" * 5000 + b"}"
+        status, data = http_post(self.port, "/api/analyze", None, raw=deep)
+        self.assertEqual(status, 400)
+        self.assertFalse(data["ok"])
+
+    def test_error_over_http_never_echoes_input(self):
+        status, data = http_post(self.port, "/api/analyze",
+                                 self.simple_payload(
+                                     myHand=["<img src=x onerror=alert(1)>"]))
+        self.assertEqual(status, 400)
+        self.assertNotIn("<img", data["error"])
+        self.assertIn("elemen ke-1", data["error"])
+
+    def test_meta_only_real_tiles(self):
+        # INFO-8: dulu menghasilkan tile mustahil "0-7".."6-7" (35 entri)
+        status, data = http_post(self.port, "/api/meta",
+                                 {"myHand": [], "played": []})
+        self.assertEqual(status, 200)
+        self.assertEqual(len(data["remaining"]), 28)
+        for k in data["remaining"]:
+            self.assertRegex(k, r"^[0-6]-[0-6]$")
 
 
 if __name__ == "__main__":
