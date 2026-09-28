@@ -466,14 +466,16 @@ function updateOpponentsDisplay() {
 
     // kandidat kartu yang mungkin dipegang lawan ini (v3.1) — klik = dia yang main
     const cand = computeOppCandidates(i, unknownKeys);
-    h += `<div class="opp-cand-label">🎴 Kemungkinan kartu (${cand.length}) — klik = dia yang main:</div>`;
+    h += `<div class="opp-cand-label">🎴 Kemungkinan kartu (${cand.length}) — klik = dia yang main: <span class="cand-hint-red">🟥 merah = bisa dimainkan sekarang</span></div>`;
     h += '<div class="opp-cand-grid">';
     if (cand.length === 0) {
       h += '<span style="font-size:0.55rem;color:#f85149;">tidak ada kartu yang mungkin — cek data PASS</span>';
     } else {
       cand.forEach((k) => {
         const [x, y] = parseKey(k);
-        h += `<div class="opp-cand-card" data-key="${k}" data-opp="${i}" role="button" tabindex="0" aria-label="${tileLabel(k)}, Lawan ${i + 1}">` +
+        // glowing merah: kartu ini SAAT INI bisa dibenturkan ke ujung papan
+        const playableNow = !boardActive || x === le || y === le || x === re || y === re;
+        h += `<div class="opp-cand-card${playableNow ? ' glow-playable' : ''}" data-key="${k}" data-opp="${i}" role="button" tabindex="0" aria-label="${tileLabel(k)}, Lawan ${i + 1}${playableNow ? ', bisa dimainkan saat ini' : ''}">` +
           `${renderPipsHTML(x, 'r')}<div class="r-div"></div>${renderPipsHTML(y, 'r')}</div>`;
       });
     }
@@ -642,6 +644,7 @@ function openHandModal() {
       }
       openHandModal();
       updateAll();
+      runAnalysis(); // live: begitu tangan diisi -> analisis mode kartu pertama
     });
   });
 
@@ -684,6 +687,7 @@ function applyQuickInput() {
 
   openHandModal(); // re-render grid (seleksi & used ter-update)
   updateAll();
+  runAnalysis(); // live: mode kartu pertama jalan sejak kartu pertama diketik
   // siap entri berikutnya: nilai terpilih otomatis, fokus kembali ke kiri
   lEl.value = '';
   rEl.value = '';
@@ -957,8 +961,9 @@ function setProgress(pct, text, detail) {
 /* ---- analisis ---- */
 async function runAnalysis() {
   if (state.isAnalyzing) { state.pendingRun = true; return; } // antre: jalankan ulang setelah ini selesai
-  // tangan boleh kosong selama papan sudah bergerak — hasil berisi CTA PASS
-  // plus profil lawan yang ter-update dari atribusi kartu saya
+  // Papan kosong + tangan terisi = MODE KARTU PERTAMA: analisis langsung jalan
+  // sehingga pemain pertama tahu kartu buka terbaik sejak awal. Tangan kosong
+  // boleh selama papan sudah bergerak — hasil berisi CTA PASS + profil lawan.
   if (state.myHand.length === 0 && state.boardTiles.length === 0) return;
 
   const cardsPerPlayer = parseInt($('cardsPerPlayer').value, 10);
