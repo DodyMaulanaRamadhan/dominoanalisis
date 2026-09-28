@@ -390,7 +390,13 @@ function updateOpponentsDisplay() {
   const cardsPerPlayer = parseInt($('cardsPerPlayer').value, 10);
   const numOpp = numPlayers - 1;
   const distributed = numPlayers * cardsPerPlayer;
-  const totalOppCardsNow = Math.max(0, distributed - state.myHand.length - state.allPlayed.length);
+  // Kartu lawan TERSEMBUNYI: kartu yang sudah main dikurangi yang jelas milik
+  // lawan (atribusi oppN) — kartu itu adalah kartu lawan, bukan kartu rahasia.
+  const attribOpp = state.playedBy.filter((w) => w && w.startsWith('opp')).length;
+  const totalOppCardsNow = Math.max(
+    0,
+    distributed - state.myHand.length - (state.allPlayed.length - attribOpp)
+  );
   const perOpp = Math.floor(totalOppCardsNow / numOpp);
 
   const used = getAllUsedKeys();
@@ -909,16 +915,14 @@ function friendlyError(msg) {
     .replace(/invalid tile key: (\S+)/, (m, k) =>
       `Kartu "${k}" tidak dikenali — pilih kartu dari daftar, jangan ketik manual.`)
     .replace(/duplicate tile: (\S+)/, (m, k) =>
-      `Kartu "${k}" muncul dua kali — periksa tangan & papan Anda.`);
+      `Kartu "${k}" muncul dua kali — periksa tangan & papan Anda.`)
+    .replace(/atribusi kartu melebihi[^\n]*/, () =>
+      `Data atribusi tidak konsisten — satu kartu tidak mungkin milik dua lawan sekaligus. Periksa kembali penandaan kartu lawan.`);
 }
 
 function buildAnalyzeRequest() {
   const numPlayers = parseInt($('playerCount').value, 10);
   const cardsPerPlayer = parseInt($('cardsPerPlayer').value, 10);
-  const totalOppCards = Math.max(
-    0,
-    numPlayers * cardsPerPlayer - state.myHand.length - state.allPlayed.length
-  );
   return {
     cmd: 'analyze',
     numPlayers,
@@ -930,7 +934,6 @@ function buildAnalyzeRequest() {
     myHand: state.myHand.slice(),
     played: state.allPlayed.slice(),
     playedBy: state.playedBy.slice(),
-    totalOppCards,
     nextSeat: parseInt($('nextSeat').value, 10),
     deadlockRule: $('deadlockRule').value,
     tieRule: $('tieRule').value,
