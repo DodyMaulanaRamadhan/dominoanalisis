@@ -32,6 +32,13 @@ const SEED = 20240922; // deterministik: input sama -> hasil sama
 const STORAGE_KEY = 'domino-analyzer-v3';
 const $ = (id) => document.getElementById(id);
 
+// Escape nilai dinamis sebelum masuk innerHTML — pertahanan XSS untuk data
+// sesi terimpor/pesan error server yang tidak kita kendalikan.
+function esc(v) {
+  return String(v).replace(/[&<>"']/g, (c) =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
 /* ---- utils: tiles & pips ---- */
 const PIPS = {
   0:[0,0,0,0,0,0,0,0,0], 1:[0,0,0,0,1,0,0,0,0], 2:[0,0,1,0,0,0,1,0,0],
@@ -113,6 +120,24 @@ function restoreFrom(obj) {
   if (!obj || obj.version !== 3 || !obj.state || !obj.setup) return false;
   const s = obj.state;
   if (!Array.isArray(s.myHand) || !Array.isArray(s.allPlayed)) return false;
+  // Data sesi (file impor / localStorage) TIDAK dipercaya: validasi nilai dulu
+  // sebelum menyentuh state apa pun — kunci hanya "lo-hi" 0..6, angka 0..6,
+  // playedBy hanya label pemain sah (mencegah XSS & crash PIPS[NaN]).
+  const isTile = (k) => typeof k === 'string' && /^[0-6]-[0-6]$/.test(k);
+  const isN06 = (v) => Number.isInteger(v) && v >= 0 && v <= 6;
+  if (!s.myHand.every(isTile) || !s.allPlayed.every(isTile)) return false;
+  if (Array.isArray(s.boardTiles) && !s.boardTiles.every((bt) =>
+    bt && typeof bt === 'object' && Array.isArray(bt.tile) &&
+    bt.tile.length === 2 && bt.tile.every(isN06) &&
+    (bt.origKey === undefined || isTile(bt.origKey)))) return false;
+  if (Array.isArray(s.playedBy) && s.playedBy.length === s.allPlayed.length &&
+      !s.playedBy.every((w) => w === 'me' || w === 'unknown' ||
+        (typeof w === 'string' && /^opp[1-4]$/.test(w)))) return false;
+  if (Array.isArray(s.opponents) && !s.opponents.every((o) =>
+    o && typeof o === 'object' &&
+    Array.isArray(o.passes) && o.passes.every((p) =>
+      p && typeof p === 'object' && isN06(p.left) && isN06(p.right)) &&
+    Array.isArray(o.eliminated) && o.eliminated.every(isN06))) return false;
   $('playerCount').value = String(obj.setup.playerCount || 4);
   updateCardsPerPlayerOptions();
   $('cardsPerPlayer').value = String(obj.setup.cardsPerPlayer || 7);
@@ -349,7 +374,7 @@ function updateHandDisplay() {
     const [a, b] = parseKey(key);
     const playable = isFirstMove || a === le || b === le || a === re || b === re;
     const cls = playable ? 'playable' : 'unplayable';
-    return `<div class="hand-card ${cls}" data-key="${key}" role="button" tabindex="0" aria-label="${tileLabel(key)}${playable ? ', bisa dimainkan' : ', tidak bisa dimainkan'}">` +
+    return `<div class="hand-card ${cls}" data-key="${esc(key)}" role="button" tabindex="0" aria-label="${esc(tileLabel(key))}${playable ? ', bisa dimainkan' : ', tidak bisa dimainkan'}">` +
       `${renderPipsHTML(a, 'h')}<div class="h-div"></div>${renderPipsHTML(b, 'h')}</div>`;
   }).join('');
 
@@ -437,10 +462,10 @@ function updateOpponentsDisplay() {
     if (hasPass) {
       h += '<div class="opp-elim"><div class="opp-elim-label">❌ PASTI TIDAK PUNYA angka:</div>';
       opp.eliminated.slice().sort((a, b) => a - b).forEach((n) => {
-        h += `<span class="elim-chip">${n}</span>`;
+        h += `<span class="elim-chip">${esc(n)}</span>`;
       });
       h += '</div>';
-      h += `<div class="opp-passlog">Riwayat pass: ${opp.passes.map((p) => `[${p.left}|${p.right}]`).join(' → ')}</div>`;
+      h += `<div class="opp-passlog">Riwayat pass: ${opp.passes.map((p) => `[${esc(p.left)}|${esc(p.right)}]`).join(' → ')}</div>`;
     }
     if (heldKeys.length > 0) {
       h += '<div style="margin-top:3px;"><span class="opp-elim-label">🎯 Kartu yang dipastikan dimainkan:</span> ';
@@ -1008,7 +1033,7 @@ async function runAnalysis() {
       panel.classList.add('active');
       $('analysisResults').innerHTML =
         `<div class="empty-state"><div class="icon">⚠️</div>` +
-        `<p><strong>Gagal menganalisis:</strong></p><p style="margin-top:5px;font-size:0.72rem;">${friendlyError(err.message)}</p></div>`;
+        `<p><strong>Gagal menganalisis:</strong></p><p style="margin-top:5px;font-size:0.72rem;">${esc(friendlyError(err.message))}</p></div>`;
     }
   } finally {
     btn.disabled = false;

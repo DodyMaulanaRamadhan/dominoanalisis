@@ -1003,7 +1003,12 @@ static std::vector<int> parseTileList(const JValue& v, const char* field) {
 static std::string runAnalyze(const JValue& req) {
     int numPlayers = req.at("numPlayers").asInt(4);
     int cardsPerPlayer = req.at("cardsPerPlayer").asInt(7);
-    int numSims = req.at("numSims").asInt(1000);
+    // numSims: clamp di level double dulu (asInt pada double ekstrem = UB),
+    // lalu ke int — cegah DoS CPU walau server lupa memvalidasi.
+    double numSimsD = req.at("numSims").asNum(1000);
+    if (!(numSimsD >= 1.0)) numSimsD = 1.0;
+    else if (numSimsD > 10000.0) numSimsD = 10000.0;
+    int numSims = static_cast<int>(numSimsD);
     unsigned long long seed = static_cast<unsigned long long>(req.at("seed").asNum(42));
     int le = req.at("leftEnd").asInt(-1);
     int re = req.at("rightEnd").asInt(-1);
