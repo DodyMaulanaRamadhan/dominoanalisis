@@ -25,6 +25,7 @@ const state = {
   pendingRun: false, // ada permintaan analisis menunggu yang sedang berjalan
   abortCtl: null,    // AbortController analisis berjalan
   lastAnalysis: null,// respons engine terakhir (untuk panel profil lawan)
+  recommended: null, // { key, a, b, newLeft, newRight } rekomendasi #1 terakhir
   timeline: [],      // snapshot untuk undo global (maks 100)
 };
 
@@ -208,6 +209,7 @@ function undoLastAction() {
   state.playedBy = snap.playedBy;
   state.opponents = snap.opponents;
   state.lastAnalysis = null;
+  state.recommended = null;
   updateAll();
   runAnalysis(); // live: undo ikut memicu analisis ulang
 }
@@ -312,6 +314,65 @@ function updateQualityBanner() {
     (q.doubles > 0 ? `<br>⚡ Balak: ${q.doubles} | Total mata: ${q.totalValue}` : '');
 }
 
+/* ---- rekomendasi (v3.3): glow biru di tangan + siluet penempatan di papan ---- */
+// Rekomendasi #1 dari engine terakhir, divalidasi ulang terhadap kondisi papan
+// SEKARANG (bisa saja basi karena kartu sudah keluar / ujung papan berubah).
+function getRecommendation() {
+  const rec = state.recommended;
+  if (!rec || typeof rec.key !== 'string') return null;
+  if (state.myHand.indexOf(rec.key) === -1) return null; // sudah keluar dari tangan
+  const le = getLeftEnd(), re = getRightEnd();
+  if (le === -1 && re === -1) return { key: rec.key, a: rec.a, b: rec.b, side: 'first' };
+  const canLeft = rec.a === le || rec.b === le;
+  const canRight = rec.a === re || rec.b === re;
+  if (!canLeft && !canRight) return null; // ujung berubah — analisis ulang akan menyegarkan
+  let side;
+  if (canLeft && !canRight) side = 'left';
+  else if (canRight && !canLeft) side = 'right';
+  // kedua sisi bisa: ikuti orientasi engine (ujung yang TIDAK berubah = sisi main)
+  else if (rec.newRight === re && rec.newLeft !== le) side = 'left';
+  else if (rec.newLeft === le && rec.newRight !== re) side = 'right';
+  else side = 'left'; // ambigu (mis. balak cocok di dua sisi) — default kiri
+  return { key: rec.key, a: rec.a, b: rec.b, side };
+}
+
+// Siluet kartu rekomendasi: kartu putus-putus biru + label sisi penempatan,
+// diorientasikan agar setengah yang cocok menyentuh ujung papan.
+function makeRecGhostHTML(rec) {
+  const le = getLeftEnd(), re = getRightEnd();
+  let x, y;
+  if (le === -1) { x = rec.a; y = rec.b; }                              // papan kosong
+  else if (rec.side === 'left') { x = rec.a === le ? rec.b : rec.a; y = le; } // kanan-kiri bertemu
+  else { x = re; y = rec.a === re ? rec.b : rec.a; }                    // kiri-kanan bertemu
+  const orientClass = x === y ? 'vertical' : 'horizontal';
+  const divider = x === y
+    ? '<div class="board-divider-v"></div>'
+    : '<div class="board-divider-h"></div>';
+  const label = rec.side === 'left' ? '⬅ TARUH DI KIRI'
+    : rec.side === 'right' ? 'TARUH DI KANAN ➡'
+    : '🎯 TARUH DI TENGAH';
+  return `<div class="rec-slot" role="img" aria-label="Siluet rekomendasi: ${esc(label)}">` +
+    `<div class="board-tile ${orientClass} ghost"><div class="board-tile-inner">` +
+    `${renderPipsHTML(x, 'b')}${divider}${renderPipsHTML(y, 'b')}</div></div>` +
+    `<div class="rec-slot-tag">${esc(label)}</div></div>`;
+}
+
+// Pastikan siluet rekomendasi terlihat di layar; kalau tidak ada siluet,
+// perilaku lama: auto-scroll ke ujung kanan.
+function scrollBoardToRecommendation(chain, rec) {
+  const scroll = $('boardScroll');
+  setTimeout(() => {
+    const slot = rec ? chain.querySelector('.rec-slot') : null;
+    if (slot) {
+      const sr = slot.getBoundingClientRect(), cr = scroll.getBoundingClientRect();
+      if (sr.left < cr.left) { scroll.scrollLeft += sr.left - cr.left - 8; return; }
+      if (sr.right > cr.right) { scroll.scrollLeft += sr.right - cr.right + 8; }
+      return; // sudah terlihat — jangan menarik scroll
+    }
+    scroll.scrollLeft = scroll.scrollWidth;
+  }, 50);
+}
+
 /* ---- render: papan ---- */
 function updateBoardDisplay() {
   const chain = $('boardChain');
@@ -326,11 +387,17 @@ function updateBoardDisplay() {
   else { rightTag.textContent = 'Kanan: -'; rightTag.classList.add('empty'); }
 
   $('boneyardChip').textContent = `📦 ${boneyardCount()}`;
+  const rec = getRecommendation();
 
   if (state.boardTiles.length === 0) {
-    chain.innerHTML = '<div class="board-empty"><div class="icon">🎲</div>' +
-      '<div>Papan kosong — pilih kartu dari tangan Anda</div></div>';
+    chain.innerHTML = rec
+      ? '<div class="board-empty"><div class="icon">🎲</div>' +
+        '<div>Papan kosong — siluet biru di bawah = kartu rekomendasi</div>' +
+        makeRecGhostHTML(rec) + '</div>'
+      : '<div class="board-empty"><div class="icon">🎲</div>' +
+        '<div>Papan kosong — pilih kartu dari tangan Anda</div></div>';
     status.textContent = 'Menunggu kartu pertama...';
+    scrollBoardToRecommendation(chain, rec);
     return;
   }
 
@@ -345,10 +412,14 @@ function updateBoardDisplay() {
       `<div class="board-tile-inner">${renderPipsHTML(a, 'b')}${divider}${renderPipsHTML(b, 'b')}</div></div>`;
   }).join('');
 
-  chain.innerHTML = html;
+  // siluet rekomendasi di sisi yang benar (kiri / kanan)
+  let full = html;
+  if (rec && rec.side === 'left') full = makeRecGhostHTML(rec) + html;
+  else if (rec) full = html + makeRecGhostHTML(rec);
+
+  chain.innerHTML = full;
   status.textContent = `${state.boardTiles.length} kartu di papan`;
-  const scroll = $('boardScroll');
-  setTimeout(() => { scroll.scrollLeft = scroll.scrollWidth; }, 50);
+  scrollBoardToRecommendation(chain, rec);
 }
 
 /* ---- render: tangan ---- */
@@ -370,11 +441,14 @@ function updateHandDisplay() {
   const le = getLeftEnd(), re = getRightEnd();
   const isFirstMove = le === -1 && re === -1;
 
+  const rec = getRecommendation();
+
   container.innerHTML = state.myHand.map((key) => {
     const [a, b] = parseKey(key);
     const playable = isFirstMove || a === le || b === le || a === re || b === re;
-    const cls = playable ? 'playable' : 'unplayable';
-    return `<div class="hand-card ${cls}" data-key="${esc(key)}" role="button" tabindex="0" aria-label="${esc(tileLabel(key))}${playable ? ', bisa dimainkan' : ', tidak bisa dimainkan'}">` +
+    const isRec = !!rec && rec.key === key;
+    const cls = (playable ? 'playable' : 'unplayable') + (isRec ? ' rec-glow' : '');
+    return `<div class="hand-card ${cls}" data-key="${esc(key)}" role="button" tabindex="0" aria-label="${esc(tileLabel(key))}${playable ? ', bisa dimainkan' : ', tidak bisa dimainkan'}${isRec ? ', ⭐ rekomendasi — mainkan ini' : ''}">` +
       `${renderPipsHTML(a, 'h')}<div class="h-div"></div>${renderPipsHTML(b, 'h')}</div>`;
   }).join('');
 
@@ -904,6 +978,7 @@ function resetGame() {
   state.playedBy = [];
   state.opponents.forEach((o) => { o.passes = []; o.eliminated = []; });
   state.lastAnalysis = null;
+  state.recommended = null;
   updateAll();
   hideAnalysis();
   $('progressContainer').classList.remove('active');
@@ -1029,6 +1104,9 @@ async function runAnalysis() {
     if (err.name === 'AbortError') {
       setProgress(100, state.liveMode ? '⏸ Live dijeda' : '🚫 Analisis dibatalkan', '');
     } else {
+      state.recommended = null;
+      updateHandDisplay();
+      updateBoardDisplay();
       const panel = $('analysisPanel');
       panel.classList.add('active');
       $('analysisResults').innerHTML =
@@ -1056,6 +1134,9 @@ function cancelAnalysis() {
 function showNoMoves() {
   const panel = $('analysisPanel');
   panel.classList.add('active');
+  state.recommended = null;
+  updateHandDisplay();
+  updateBoardDisplay();
   setProgress(100, '⚠️ Tidak ada langkah valid', '');
   $('analysisResults').innerHTML =
     '<div class="pass-cta"><strong>😔 Tidak ada langkah valid — Anda harus PASS (lewat).</strong><br>' +
@@ -1094,6 +1175,15 @@ function displayResults(data, isFirstMove, hasPassData) {
   const results = sortResults(data.moves, isFirstMove);
   const best = results[0];
   const numSims = data.numSims;
+
+  // rekomendasi #1 → glow biru di tangan + siluet di papan (tanpa perlu scroll)
+  state.recommended = {
+    key: tileKey([best.a, best.b]),
+    a: best.a, b: best.b,
+    newLeft: best.newLeft, newRight: best.newRight,
+  };
+  updateHandDisplay();
+  updateBoardDisplay();
 
   // chips ringkasan mode
   const chips = [];
