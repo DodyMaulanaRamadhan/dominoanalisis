@@ -92,6 +92,7 @@ function serializeState() {
       nextSeat: $('nextSeat').value,
       deadlockRule: $('deadlockRule').value,
       tieRule: $('tieRule').value,
+      cangkulMode: $('cangkulMode').value,
       adversarial: $('adversarial').checked,
     },
     state: {
@@ -118,6 +119,7 @@ function restoreFrom(obj) {
   $('nextSeat').value = String(obj.setup.nextSeat || 1);
   if (obj.setup.deadlockRule) $('deadlockRule').value = obj.setup.deadlockRule;
   if (obj.setup.tieRule) $('tieRule').value = obj.setup.tieRule;
+  if (obj.setup.cangkulMode) $('cangkulMode').value = obj.setup.cangkulMode;
   $('adversarial').checked = !!obj.setup.adversarial;
   state.myHand = s.myHand;
   state.boardTiles = Array.isArray(s.boardTiles) ? s.boardTiles : [];
@@ -208,8 +210,13 @@ function updateSetupInfo() {
   const distributed = numPlayers * cardsPerPlayer;
   const bone = Math.max(0, 28 - distributed);
 
+  const useCangkul = $('cangkulMode').value === 'ya';
   let info = `${numPlayers} pemain × ${cardsPerPlayer} kartu = ${distributed} dibagikan`;
-  info += bone > 0 ? ` | Cangkul: ${bone}` : ' | Semua kartu terpakai';
+  if (bone > 0) {
+    info += useCangkul ? ` | Cangkul: ${bone} kartu (aktif)` : ` | Cangkul: TIDAK — ${bone} kartu mati`;
+  } else {
+    info += ' | Semua kartu terpakai (tanpa sisa)';
+  }
   info += ` (maks ${getMaxCardsPerPlayer(numPlayers)}/pemain)`;
   $('setupInfo').textContent = info;
 }
@@ -427,7 +434,22 @@ function updateOpponentsDisplay() {
       }
     }
 
-    h += `<div class="opp-info">📊 Kemungkinan kartu: <strong>${possible.length}</strong> dari ${unknownKeys.length} kartu unknown`;
+    // kandidat kartu yang mungkin dipegang lawan ini (v3.1) — klik = dia yang main
+    const cand = computeOppCandidates(i, unknownKeys);
+    h += `<div class="opp-cand-label">🎴 Kemungkinan kartu (${cand.length}) — klik = dia yang main:</div>`;
+    h += '<div class="opp-cand-grid">';
+    if (cand.length === 0) {
+      h += '<span style="font-size:0.55rem;color:#f85149;">tidak ada kartu yang mungkin — cek data PASS</span>';
+    } else {
+      cand.forEach((k) => {
+        const [x, y] = parseKey(k);
+        h += `<div class="opp-cand-card" data-key="${k}" data-opp="${i}" role="button" tabindex="0" aria-label="${tileLabel(k)}, Lawan ${i + 1}">` +
+          `${renderPipsHTML(x, 'r')}<div class="r-div"></div>${renderPipsHTML(y, 'r')}</div>`;
+      });
+    }
+    h += '</div>';
+
+    h += `<div class="opp-info">📊 Filter PASS: <strong>${possible.length}</strong> dari ${unknownKeys.length} kartu unknown`;
     if (hasPass && unknownKeys.length > 0) {
       const reducedPct = Math.round((1 - possible.length / unknownKeys.length) * 100);
       h += ` (tereliminasi ${reducedPct}%)`;
@@ -442,6 +464,11 @@ function updateOpponentsDisplay() {
       const idx = parseInt(btn.dataset.opp, 10);
       if (btn.dataset.action === 'pass') markOpponentPass(idx);
       else undoLastAction();
+    });
+  });
+  container.querySelectorAll('.opp-cand-card').forEach((el) => {
+    el.addEventListener('click', () => {
+      if (!state.isAnalyzing) handleOppCardPlay(el.dataset.key, parseInt(el.dataset.opp, 10));
     });
   });
 }
@@ -484,14 +511,52 @@ function updateNumberMap() {
 
 function updateRemainingDisplay() {
   const container = $('remainingTiles');
+  const header = $('remainingHeader');
   const remaining = getRemainingTiles();
   $('remainingCount').textContent = remaining.length;
+  const useCangkul = $('cangkulMode').value === 'ya';
+  const bone = boneyardCount();
 
-  if (remaining.length === 0) {
-    container.innerHTML = '<span class="placeholder" style="font-size:0.65rem;">Semua kartu sudah dipilih/dimainkan</span>';
+  // Mode A: semua kartu terbagi habis -> tidak ada sisa; kartu ada di kolom lawan
+  if (bone === 0) {
+    header.innerHTML = '📦 Kartu Sisa (<span id="remainingCount">0</span>) — semua kartu ada di tangan pemain → lihat kolom Lawan';
+    container.innerHTML = '<span class="placeholder" style="font-size:0.65rem;">Tidak ada kartu sisa/cangkul. Kartu kandidat tiap lawan tampil di kolomnya masing-masing.</span>';
     return;
   }
 
+  // Mode C: cangkul TIDAK dipakai -> tampilkan kandidat kartu yang paling mungkin mati
+  if (!useCangkul) {
+    header.innerHTML = `💀 Kartu Sisa Mati — tidak pernah disambar (<span id="remainingCount">${remaining.length}</span>)`;
+    const dead = (state.lastAnalysis && state.lastAnalysis.deadTiles) || [];
+    const byNum = (state.lastAnalysis && state.lastAnalysis.deadByNumber) || null;
+    let html = '';
+    if (dead.length > 0) {
+      html += '<div class="dead-nums">';
+      for (let n = 0; n <= 6; n++) {
+        html += `<span class="dead-num-chip">${n}: ±${(byNum ? byNum[n] : 0).toFixed(1)} mati</span>`;
+      }
+      html += '</div>';
+      html += '<div class="remaining-tiles-dead">';
+      dead.forEach((d) => {
+        const pct = (d.prob * 100);
+        const cls = pct >= 50 ? 'dead-likely' : pct >= 25 ? 'dead-mid' : '';
+        html += `<div class="remaining-card ${cls}" aria-label="${tileLabel(d.key)}, kemungkinan mati ${pct.toFixed(0)} persen">` +
+          `${renderPipsHTML(d.a, 'r')}<div class="r-div"></div>${renderPipsHTML(d.b, 'r')}</div>`;
+      });
+      html += '</div>';
+    } else {
+      html = '<span class="placeholder" style="font-size:0.65rem;">Klik 🔬 Analisis untuk menghitung kandidat kartu mati (berbasis data PASS & atribusi).</span>';
+    }
+    container.innerHTML = html;
+    return;
+  }
+
+  // Mode B: cangkul aktif -> klik kartu = kartu lawan nyamber (atribusi)
+  header.innerHTML = `📦 Kartu Cangkul — klik = kartu lawan nyamber dari sini (<span id="remainingCount">${remaining.length}</span>)`;
+  if (remaining.length === 0) {
+    container.innerHTML = '<span class="placeholder" style="font-size:0.65rem;">Cangkul sudah habis disambar.</span>';
+    return;
+  }
   container.innerHTML = remaining.map((tile) => {
     const [a, b] = tile;
     return `<div class="remaining-card" data-key="${tileKey(tile)}" role="button" tabindex="0" aria-label="${tileLabel(tileKey(tile))}">` +
@@ -553,14 +618,78 @@ function openHandModal() {
   $('handModal').classList.add('active');
 }
 
+/* ---- quick-input kartu (v3.2): dua kolom angka, urutan bebas ---- */
+function qiSanitize(raw) {
+  // hanya digit pertama yang dianggap; di luar 0..6 dianggap tidak valid
+  const digits = String(raw).replace(/[^0-9]/g, '');
+  if (!digits) return { ok: false, val: 0 };
+  const val = parseInt(digits[0], 10);
+  return { ok: val >= 0 && val <= 6, val };
+}
+
+function qiFlashError(el) {
+  el.classList.add('qi-error');
+  setTimeout(() => el.classList.remove('qi-error'), 700);
+}
+
+function applyQuickInput() {
+  const lEl = $('qiLeft'), rEl = $('qiRight');
+  const L = qiSanitize(lEl.value);
+  const R = qiSanitize(rEl.value);
+  if (!L.ok) { qiFlashError(lEl); return; }
+  if (!R.ok) { qiFlashError(rEl); return; }
+  const key = `${Math.min(L.val, R.val)}-${Math.max(L.val, R.val)}`;
+
+  const cardsPerPlayer = parseInt($('cardsPerPlayer').value, 10);
+  const idx = state.myHand.indexOf(key);
+  if (idx >= 0) {
+    state.myHand.splice(idx, 1); // toggle: kartu sudah ada -> keluarkan
+  } else {
+    if (state.myHand.length >= cardsPerPlayer) {
+      alert(`Maksimal ${cardsPerPlayer} kartu per pemain!`);
+      return;
+    }
+    state.myHand.push(key);
+  }
+
+  openHandModal(); // re-render grid (seleksi & used ter-update)
+  updateAll();
+  // siap entri berikutnya: nilai terpilih otomatis, fokus kembali ke kiri
+  lEl.value = '';
+  rEl.value = '';
+  lEl.focus();
+}
+
+function initQuickInput() {
+  $('qiAdd').addEventListener('click', applyQuickInput);
+  ['qiLeft', 'qiRight'].forEach((id) => {
+    const el = $(id);
+    // blok input tidak-valid sebelum terjadi (ketik 7/9 -> dibuang)
+    el.addEventListener('input', () => {
+      const digits = el.value.replace(/[^0-9]/g, '').slice(0, 1);
+      if (digits && parseInt(digits, 10) > 6) {
+        qiFlashError(el);
+        el.value = '';
+        return;
+      }
+      if (el.value !== digits) el.value = digits;
+      // auto-lompat ke kolom kanan setelah 1 digit sah
+      if (digits && id === 'qiLeft' && parseInt(digits, 10) >= 0) $('qiRight').focus();
+    });
+    el.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); applyQuickInput(); }
+    });
+  });
+}
+
 function closeHandModal() {
   $('handModal').classList.remove('active');
   updateAll();
 }
 
 /* ---- modal: pilih ujung ---- */
-function showEndChoice(key, source, a, b) {
-  state.pending = { key, source };
+function showEndChoice(key, source, a, b, who) {
+  state.pending = { key, source, who: who || null };
   const le = getLeftEnd(), re = getRightEnd();
   const newLeftIfLeft = a === le ? b : a;
   const newRightIfRight = a === re ? b : a;
@@ -574,10 +703,49 @@ function showEndChoice(key, source, a, b) {
 
 function chooseEnd(side) {
   if (!state.pending) return;
-  const { key, source } = state.pending;
+  const { key, source, who } = state.pending;
   state.pending = null;
   $('endChoiceModal').classList.remove('active');
-  executePlay(key, source, side);
+  executePlay(key, source, side, who);
+}
+
+/* ---- main kartu dari kolom lawan (v3.1) ---- */
+function computeOppCandidates(oppIdx, unknownKeys) {
+  const elim = state.opponents[oppIdx].eliminated;
+  // kartu yang sudah dipastikan dimainkan lawan LAIN tidak mungkin dipegang lawan ini
+  const knownElsewhere = {};
+  state.allPlayed.forEach((k, idx) => {
+    const w = state.playedBy[idx];
+    if (w && w.startsWith('opp')) {
+      const p = parseInt(w.slice(3), 10) - 1;
+      if (p !== oppIdx) knownElsewhere[k] = true;
+    }
+  });
+  return unknownKeys.filter((k) => {
+    if (knownElsewhere[k]) return false;
+    const [a, b] = parseKey(k);
+    return !elim.includes(a) && !elim.includes(b);
+  });
+}
+
+function handleOppCardPlay(key, oppIdx) {
+  const who = `opp${oppIdx + 1}`;
+  const [a, b] = parseKey(key);
+  const le = getLeftEnd(), re = getRightEnd();
+  if (le === -1 && re === -1) {
+    executePlay(key, 'remaining', 'first', who);
+    return;
+  }
+  const canLeft = a === le || b === le;
+  const canRight = a === re || b === re;
+  if (!canLeft && !canRight) {
+    alert(`Kartu [${a}|${b}] tidak bisa disambung ke ujung ${le}|${re} — periksa lagi kartu yang dimainkan lawan.`);
+    return;
+  }
+  // lawan boleh memilih sisi — tanyakan bila keduanya cocok (bug auto-pilih diperbaiki)
+  if (canLeft && canRight) showEndChoice(key, 'remaining', a, b, who);
+  else if (canLeft) executePlay(key, 'remaining', 'left', who);
+  else executePlay(key, 'remaining', 'right', who);
 }
 
 /* ---- modal atribusi: siapa yang main kartu lawan? (v3) ---- */
@@ -741,6 +909,7 @@ function buildAnalyzeRequest() {
     nextSeat: parseInt($('nextSeat').value, 10),
     deadlockRule: $('deadlockRule').value,
     tieRule: $('tieRule').value,
+    cangkul: $('cangkulMode').value === 'ya',
     adversarial: $('adversarial').checked,
     opponents: state.opponents.map((o) => ({
       passes: o.passes.length,
@@ -855,6 +1024,7 @@ function displayResults(data, isFirstMove, hasPassData) {
   panel.classList.add('active');
   div.innerHTML = '';
   state.lastAnalysis = data;
+  updateRemainingDisplay(); // refresh mode-C kandidat kartu mati dengan data terbaru
 
   const results = sortResults(data.moves, isFirstMove);
   const best = results[0];
@@ -1057,7 +1227,12 @@ $('cardsPerPlayer').addEventListener('change', () => {
   updateSetupInfo();
   updateAll();
 });
-$('pickHandBtn').addEventListener('click', openHandModal);
+$('cangkulMode').addEventListener('change', () => {
+  updateSetupInfo();
+  updateAll();
+});
+$('pickHandBtn').addEventListener('click', () => { openHandModal(); $('qiLeft').focus(); });
+initQuickInput();
 $('closeModalBtn').addEventListener('click', closeHandModal);
 $('handModal').addEventListener('click', (e) => {
   if (e.target === $('handModal')) closeHandModal();

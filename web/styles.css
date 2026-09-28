@@ -305,3 +305,28 @@ header p{color:#8b949e;font-size:0.62rem;margin-top:2px;}
 .ci-note{font-size:0.55rem;color:#484f58;margin-top:2px;}
 .pass-cta{background:rgba(210,153,34,0.08);border:1px solid rgba(210,153,34,0.35);border-radius:8px;padding:10px;margin-bottom:8px;font-size:0.65rem;color:#d29922;line-height:1.5;}
 .pass-cta strong{color:#e3b341;}
+
+/* ---- v3.1: kolom lawan interaktif + panel kartu mati ---- */
+.opp-cand-label{font-size:0.56rem;color:#8b949e;margin:4px 0 3px;}
+.opp-cand-grid{display:flex;flex-wrap:wrap;gap:3px;margin-bottom:4px;min-height:20px;}
+.opp-cand-card{display:inline-flex;flex-direction:column;background:#1a1f27;border:2px solid #30363d;border-radius:5px;overflow:hidden;cursor:pointer;transition:all 0.12s;width:34px;user-select:none;}
+.opp-cand-card:active{transform:scale(0.9);}
+.opp-cand-card:hover{border-color:#f85149;box-shadow:0 0 6px rgba(248,81,73,0.3);}
+.dead-nums{display:flex;flex-wrap:wrap;gap:3px;margin-bottom:5px;}
+.dead-num-chip{background:rgba(248,81,73,0.08);border:1px solid rgba(248,81,73,0.3);border-radius:4px;padding:1px 6px;font-size:0.56rem;color:#f85149;font-weight:600;}
+.remaining-tiles-dead{display:flex;flex-wrap:wrap;gap:4px;}
+.remaining-card.dead-likely{border-color:#f85149;box-shadow:0 0 8px rgba(248,81,73,0.25);opacity:1;}
+.remaining-card.dead-mid{border-color:#d29922;opacity:0.85;}
+.remaining-tiles-dead .remaining-card{cursor:default;}
+
+/* ---- v3.2: quick-input kartu (the flash) ---- */
+.quick-input{display:flex;align-items:center;gap:8px;margin:8px 0 6px;}
+.quick-input input{flex:1;min-width:0;background:#0d1117;border:2px solid #30363d;border-radius:8px;color:#e6edf3;font-family:'Inter',system-ui,sans-serif;font-size:1.15rem;font-weight:800;text-align:center;padding:10px 6px;-moz-appearance:textfield;appearance:textfield;}
+.quick-input input::-webkit-outer-spin-button,.quick-input input::-webkit-inner-spin-button{-webkit-appearance:none;margin:0;}
+.quick-input input:focus{outline:none;border-color:#3fb950;box-shadow:0 0 8px rgba(63,185,80,0.25);}
+.quick-input input.qi-error{border-color:#f85149;box-shadow:0 0 8px rgba(248,81,73,0.35);}
+.quick-input input::placeholder{color:#484f58;font-weight:600;font-size:0.75rem;}
+.qi-dash{color:#8b949e;font-weight:800;font-size:1rem;flex-shrink:0;}
+.qi-add{flex-shrink:0;background:#238636;border:none;color:white;border-radius:8px;padding:12px 14px;font-family:'Inter',system-ui,sans-serif;font-size:0.78rem;font-weight:800;cursor:pointer;}
+.qi-add:active{transform:scale(0.95);}
+.qi-hint{font-size:0.58rem;color:#484f58;line-height:1.4;margin-bottom:8px;}

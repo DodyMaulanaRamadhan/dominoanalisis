@@ -137,6 +137,8 @@ def validate_analyze(req: dict) -> str | None:
         return "deadlockRule harus 'lowest' atau 'average'"
     if req.get("tieRule", "win") not in ("win", "lose"):
         return "tieRule harus 'win' atau 'lose'"
+    if not isinstance(req.get("cangkul", True), bool):
+        return "cangkul harus boolean"
 
     opps = req.get("opponents", [])
     if not isinstance(opps, list):

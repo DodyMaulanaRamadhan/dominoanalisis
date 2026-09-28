@@ -60,6 +60,13 @@
           <option value="lose">Kalah</option>
         </select>
       </div>
+      <div class="setup-item">
+        <label for="cangkulMode">Main Cangkul?</label>
+        <select id="cangkulMode">
+          <option value="ya" selected>Ya — sisa bisa disambar</option>
+          <option value="tidak">Tidak — sisa mati</option>
+        </select>
+      </div>
     </div>
     <div class="setup-info" id="setupInfo"></div>
     <div class="setup-toggles">
@@ -128,7 +135,7 @@
 
   <!-- ===== KARTU SISA ===== -->
   <div class="remaining-panel">
-    <div class="remaining-header">📦 Kartu Sisa — klik = kartu lawan main / keluar (<span id="remainingCount">28</span>)</div>
+    <div class="remaining-header" id="remainingHeader">📦 Kartu Sisa — klik = kartu lawan main / keluar (<span id="remainingCount">28</span>)</div>
     <div class="remaining-tiles" id="remainingTiles"></div>
   </div>
 
@@ -163,6 +170,15 @@
       <span>🃏 Pilih Kartu Anda</span>
       <button class="modal-close" id="closeModalBtn">✕ Tutup</button>
     </div>
+    <div class="quick-input">
+      <input id="qiLeft" type="number" inputmode="numeric" min="0" max="6" step="1"
+             placeholder="kiri" aria-label="Nilai kiri kartu, angka 0 sampai 6" autocomplete="off">
+      <span class="qi-dash">–</span>
+      <input id="qiRight" type="number" inputmode="numeric" min="0" max="6" step="1"
+             placeholder="kanan" aria-label="Nilai kanan kartu, angka 0 sampai 6" autocomplete="off">
+      <button class="qi-add" id="qiAdd">+ Tambah</button>
+    </div>
+    <div class="qi-hint">⚡ Ketik dua angka 0–6 lalu Enter — urutan bebas (5 &amp; 4 = kartu 4-5). Ketik kartu yang sudah ada untuk menghapusnya.</div>
     <div class="modal-grid" id="handModalGrid"></div>
   </div>
 </div>
