@@ -157,8 +157,14 @@ function setLiveMode(on) {
   state.liveMode = on;
   const btn = $('analyzeBtn');
   const chip = $('liveChip');
+  const hdr = $('headerLive');
   btn.classList.toggle('running', on);
   chip.classList.toggle('active', on);
+  if (hdr) {
+    hdr.classList.toggle('on', on);
+    hdr.classList.toggle('paused', !on);
+    hdr.textContent = on ? '🔴 LIVE' : '⏸ LIVE';
+  }
   if (on) {
     btn.textContent = '⏸ Jeda Live';
     runAnalysis();
@@ -948,7 +954,9 @@ function setProgress(pct, text, detail) {
 /* ---- analisis ---- */
 async function runAnalysis() {
   if (state.isAnalyzing) { state.pendingRun = true; return; } // antre: jalankan ulang setelah ini selesai
-  if (state.myHand.length === 0) return;
+  // tangan boleh kosong selama papan sudah bergerak — hasil berisi CTA PASS
+  // plus profil lawan yang ter-update dari atribusi kartu saya
+  if (state.myHand.length === 0 && state.boardTiles.length === 0) return;
 
   const cardsPerPlayer = parseInt($('cardsPerPlayer').value, 10);
   if (state.myHand.length > cardsPerPlayer) {
@@ -1278,6 +1286,9 @@ updateCardsPerPlayerOptions();
 initOpponents();
 loadState();
 updateAll();
+
+/* ---- LIVE mode aktif otomatis sejak aplikasi dibuka (v3.2) ---- */
+setLiveMode(true);
 
 /* ---- PWA ---- */
 if ('serviceWorker' in navigator) {
