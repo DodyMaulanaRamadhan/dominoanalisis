@@ -330,3 +330,8 @@ header p{color:#8b949e;font-size:0.62rem;margin-top:2px;}
 .qi-add{flex-shrink:0;background:#238636;border:none;color:white;border-radius:8px;padding:12px 14px;font-family:'Inter',system-ui,sans-serif;font-size:0.78rem;font-weight:800;cursor:pointer;}
 .qi-add:active{transform:scale(0.95);}
 .qi-hint{font-size:0.58rem;color:#484f58;line-height:1.4;margin-bottom:8px;}
+
+/* ---- v3.2: live analysis mode ---- */
+.live-chip{display:none;font-size:0.55rem;font-weight:800;color:#3fb950;background:rgba(63,185,80,0.12);border:1px solid #3fb950;border-radius:8px;padding:1px 7px;margin-left:6px;vertical-align:middle;}
+.live-chip.active{display:inline-block;animation:pulse 1.6s infinite;}
+.btn-analyze.running{background:linear-gradient(135deg,#da3633,#f85149);}
