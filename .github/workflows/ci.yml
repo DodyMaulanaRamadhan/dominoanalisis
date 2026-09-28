@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  engine-linux:
+    name: Engine (g++, Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build engine
+        run: python tools/build_engine.py --force
+      - name: Self-test
+        run: python tools/selftest.py
+      - name: Server tests
+        run: python tools/test_server.py
+
+  engine-windows:
+    name: Engine (MSVC, Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build engine
+        run: python tools/build_engine.py --force
+      - name: Self-test
+        run: python tools/selftest.py
+      - name: Server tests
+        run: python tools/test_server.py
+
+  server-linux:
+    name: Server unit tests (Python 3.11, no engine)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run server tests (engine-dependent tests skip gracefully)
+        run: python tools/test_server.py

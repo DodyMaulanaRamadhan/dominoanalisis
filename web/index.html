@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
 <title>Domino Analyzer Pro — Opponent Tracking</title>
 <link rel="stylesheet" href="styles.css">
+<link rel="manifest" href="manifest.json">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect x='3' y='2' width='18' height='20' rx='3' fill='%23e6edf3'/%3E%3Ccircle cx='8' cy='7.5' r='1.6' fill='%231a1f27'/%3E%3Ccircle cx='16' cy='7.5' r='1.6' fill='%231a1f27'/%3E%3Ccircle cx='12' cy='12' r='1.6' fill='%231a1f27'/%3E%3Ccircle cx='8' cy='16.5' r='1.6' fill='%231a1f27'/%3E%3Ccircle cx='16' cy='16.5' r='1.6' fill='%231a1f27'/%3E%3C/svg%3E">
 </head>
 <body>
@@ -12,7 +13,7 @@
 
   <header>
     <h1>🎲 Domino Analyzer Pro</h1>
-    <p>Jerat • Blok • Adu • Dominasi • Tracking Lawan</p>
+    <p>Jerat • Blok • Adu • Dominasi • Tracking Lawan • <span class="v3-chip">v3</span></p>
   </header>
 
   <!-- ===== SETUP ===== -->
@@ -40,15 +41,39 @@
         </select>
       </div>
     </div>
+    <div class="setup-row" style="margin-top:6px;">
+      <div class="setup-item">
+        <label for="nextSeat">Main Setelah Saya</label>
+        <select id="nextSeat"></select>
+      </div>
+      <div class="setup-item">
+        <label for="deadlockRule">Adu: Banding</label>
+        <select id="deadlockRule">
+          <option value="lowest">Mata terkecil</option>
+          <option value="average">Rata-rata</option>
+        </select>
+      </div>
+      <div class="setup-item">
+        <label for="tieRule">Seri = ?</label>
+        <select id="tieRule">
+          <option value="win">Menang</option>
+          <option value="lose">Kalah</option>
+        </select>
+      </div>
+    </div>
     <div class="setup-info" id="setupInfo"></div>
+    <div class="setup-toggles">
+      <label class="toggle"><input type="checkbox" id="adversarial"> 😈 Lawan respons cerdas (mode teliti, lebih lambat)</label>
+    </div>
   </div>
 
   <div class="quality-banner" id="qualityBanner"></div>
+  <div class="win-banner" id="winBanner">🎉 <strong>TANGAN HABIS — ANDA MENANG!</strong> 🎉</div>
 
   <!-- ===== PAPAN ===== -->
   <div class="board-panel">
     <div class="board-label">
-      <span>🎴 Meja Domino</span>
+      <span>🎴 Meja Domino <span class="boneyard-chip" id="boneyardChip" title="Kartu cangkul tersisa">📦 -</span></span>
       <span id="boardStatus" class="status-hint">Menunggu kartu pertama...</span>
     </div>
     <div class="board-ends">
@@ -84,8 +109,8 @@
     <div class="opponents-title">👥 Lawan — Tracking &amp; Eliminasi</div>
     <div class="panel-hint">
       Tekan <strong style="color:#f85149;">PASS</strong> saat lawan lewat/gak bisa jalan.
-      Sistem otomatis mengeliminasi semua kartu dengan angka ujung papan dari kemungkinan
-      kartu mereka → prediksi jadi lebih akurat!
+      Saat lawan <em>memainkan</em> kartu, mainkan dari <strong>Kartu Sisa</strong> di bawah
+      dan pilih siapa pemainnya → sistem mengeliminasi kartu itu dari lawan lain.
     </div>
     <div id="opponentsContainer"></div>
   </div>
@@ -103,7 +128,7 @@
 
   <!-- ===== KARTU SISA ===== -->
   <div class="remaining-panel">
-    <div class="remaining-header">📦 Kartu Sisa — klik untuk mainkan ke papan (<span id="remainingCount">28</span>)</div>
+    <div class="remaining-header">📦 Kartu Sisa — klik = kartu lawan main / keluar (<span id="remainingCount">28</span>)</div>
     <div class="remaining-tiles" id="remainingTiles"></div>
   </div>
 
@@ -111,8 +136,11 @@
   <div class="actions-bar">
     <button class="btn btn-analyze" id="analyzeBtn">🔬 Analisis</button>
     <button class="btn btn-undo" id="undoBtn">↩️ Undo</button>
+    <button class="btn btn-undo" id="exportBtn">💾 Export</button>
+    <button class="btn btn-undo" id="importBtn">📂 Import</button>
     <button class="btn btn-reset" id="resetBtn">🔄 Reset</button>
   </div>
+  <input type="file" id="importFile" accept="application/json" style="display:none">
 
   <div class="progress-container" id="progressContainer">
     <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
@@ -122,7 +150,7 @@
 
   <!-- ===== HASIL ===== -->
   <div class="analysis-panel" id="analysisPanel">
-    <div class="analysis-title">📊 Hasil Analisis</div>
+    <div class="analysis-title">📊 Hasil Analisis <span id="analysisChips"></span></div>
     <div id="analysisResults"></div>
   </div>
 
@@ -154,6 +182,16 @@
         <div class="result" id="resultRight">-</div>
       </div>
     </div>
+  </div>
+</div>
+
+<!-- ===== MODAL ATRIBUSI LAWAN (v3) ===== -->
+<div class="modal-overlay" id="attribModal">
+  <div class="end-choice-modal">
+    <div class="end-choice-title">Siapa yang memainkan kartu ini?</div>
+    <div class="end-choice-tile" id="attribTile"></div>
+    <div class="attrib-buttons" id="attribButtons"></div>
+    <button class="attrib-unknown" id="attribUnknown">🤷 Tidak tahu / lupa</button>
   </div>
 </div>
 
