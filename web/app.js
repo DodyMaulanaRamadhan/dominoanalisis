@@ -1,23 +1,33 @@
 /* ============================================================================
-   Domino Analyzer Pro — app.js
-   Sections: state · utils · setup · render · modals · play flow ·
-             undo/reset · API · results · init
-   Semua perhitungan berat (Monte-Carlo, skoring) dilakukan engine C++
-   lewat POST /api/analyze — file ini hanya UI + orkestrasi.
+   Domino Analyzer Pro — app.js (v3)
+   Sections: state · utils · persistence · setup · render · modals ·
+             attribution · play flow (timeline) · API · results · init
+
+   Semua perhitungan berat (Monte-Carlo, skoring, ranking) dilakukan engine
+   C++ lewat POST /api/analyze — file ini hanya UI + orkestrasi.
+   v3: atribusi kartu per lawan, profil kekayaan angka, timeline undo,
+   autosave + export/import, banner menang, alur PASS, cancel analisis,
+   confidence interval, PWA, aksesibilitas.
    ========================================================================== */
 'use strict';
 
 /* ---- state ---- */
 const state = {
   myHand: [],        // ["3-5", ...]
-  boardTiles: [],    // { tile:[a,b], origKey, owner:'me'|'opp'|'first', source }
+  boardTiles: [],    // { tile:[a,b], origKey, owner, source }
   allPlayed: [],     // semua key yang ada di papan
+  playedBy: [],      // paralel allPlayed: "me"|"opp1".."opp4"|"unknown"
   opponents: [],     // { passes:[{left,right,boardLen}], eliminated:[num] }
   pending: null,     // { key, source } menunggu pilihan ujung
+  pendingAttrib: null, // { key } menunggu atribusi pemain
   isAnalyzing: false,
+  abortCtl: null,    // AbortController analisis berjalan
+  lastAnalysis: null,// respons engine terakhir (untuk panel profil lawan)
+  timeline: [],      // snapshot untuk undo global (maks 100)
 };
 
 const SEED = 20240922; // deterministik: input sama -> hasil sama
+const STORAGE_KEY = 'domino-analyzer-v3';
 const $ = (id) => document.getElementById(id);
 
 /* ---- utils: tiles & pips ---- */
@@ -38,6 +48,7 @@ const parseKey = (k) => k.split('-').map(Number);
 const tileValue = (k) => { const [a, b] = parseKey(k); return a + b; };
 const handValue = (arr) => arr.reduce((s, k) => s + tileValue(k), 0);
 const arrToSet = (arr) => Object.fromEntries(arr.map((k) => [k, true]));
+const tileLabel = (k) => { const [a, b] = parseKey(k); return `kartu ${a} ${b}`; };
 
 function renderPipsHTML(val, prefix) {
   const p = PIPS[val];
@@ -64,6 +75,91 @@ function getRemainingTiles() {
 function getMaxCardsPerPlayer(numPlayers) {
   return Math.floor(28 / numPlayers);
 }
+function boneyardCount() {
+  const numPlayers = parseInt($('playerCount').value, 10);
+  const cardsPerPlayer = parseInt($('cardsPerPlayer').value, 10);
+  return Math.max(0, 28 - numPlayers * cardsPerPlayer);
+}
+
+/* ---- persistence (autosave + export/import) ---- */
+function serializeState() {
+  return {
+    version: 3,
+    setup: {
+      playerCount: $('playerCount').value,
+      cardsPerPlayer: $('cardsPerPlayer').value,
+      simCount: $('simCount').value,
+      nextSeat: $('nextSeat').value,
+      deadlockRule: $('deadlockRule').value,
+      tieRule: $('tieRule').value,
+      adversarial: $('adversarial').checked,
+    },
+    state: {
+      myHand: state.myHand,
+      boardTiles: state.boardTiles,
+      allPlayed: state.allPlayed,
+      playedBy: state.playedBy,
+      opponents: state.opponents,
+    },
+  };
+}
+function saveState() {
+  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(serializeState())); } catch (e) { /* private mode */ }
+}
+function restoreFrom(obj) {
+  if (!obj || obj.version !== 3 || !obj.state || !obj.setup) return false;
+  const s = obj.state;
+  if (!Array.isArray(s.myHand) || !Array.isArray(s.allPlayed)) return false;
+  $('playerCount').value = String(obj.setup.playerCount || 4);
+  updateCardsPerPlayerOptions();
+  $('cardsPerPlayer').value = String(obj.setup.cardsPerPlayer || 7);
+  $('simCount').value = String(obj.setup.simCount || 2000);
+  updateCardsPerPlayerOptions(); // re-populate nextSeat for this player count
+  $('nextSeat').value = String(obj.setup.nextSeat || 1);
+  if (obj.setup.deadlockRule) $('deadlockRule').value = obj.setup.deadlockRule;
+  if (obj.setup.tieRule) $('tieRule').value = obj.setup.tieRule;
+  $('adversarial').checked = !!obj.setup.adversarial;
+  state.myHand = s.myHand;
+  state.boardTiles = Array.isArray(s.boardTiles) ? s.boardTiles : [];
+  state.allPlayed = s.allPlayed;
+  state.playedBy = Array.isArray(s.playedBy) && s.playedBy.length === s.allPlayed.length
+    ? s.playedBy : s.allPlayed.map(() => 'unknown');
+  state.opponents = Array.isArray(s.opponents) ? s.opponents : [];
+  initOpponents();
+  updateSetupInfo();
+  updateAll();
+  return true;
+}
+function loadState() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (raw) restoreFrom(JSON.parse(raw));
+  } catch (e) { /* korup — mulai bersih */ }
+}
+
+/* ---- timeline (undo global yang konsisten, termasuk PASS) ---- */
+function pushSnapshot() {
+  state.timeline.push(JSON.stringify({
+    myHand: state.myHand,
+    boardTiles: state.boardTiles,
+    allPlayed: state.allPlayed,
+    playedBy: state.playedBy,
+    opponents: state.opponents,
+  }));
+  if (state.timeline.length > 100) state.timeline.shift();
+}
+function undoLastAction() {
+  if (state.isAnalyzing || state.timeline.length === 0) return;
+  const snap = JSON.parse(state.timeline.pop());
+  state.myHand = snap.myHand;
+  state.boardTiles = snap.boardTiles;
+  state.allPlayed = snap.allPlayed;
+  state.playedBy = snap.playedBy;
+  state.opponents = snap.opponents;
+  state.lastAnalysis = null;
+  updateAll();
+  hideAnalysis();
+}
 
 /* ---- setup ---- */
 function initOpponents() {
@@ -76,7 +172,8 @@ function initOpponents() {
 }
 
 function updateCardsPerPlayerOptions() {
-  const maxCards = getMaxCardsPerPlayer(parseInt($('playerCount').value, 10));
+  const numPlayers = parseInt($('playerCount').value, 10);
+  const maxCards = getMaxCardsPerPlayer(numPlayers);
   const sel = $('cardsPerPlayer');
   const oldVal = parseInt(sel.value, 10);
 
@@ -89,6 +186,18 @@ function updateCardsPerPlayerOptions() {
   }
   sel.value = oldVal >= 3 && oldVal <= maxCards ? oldVal : maxCards;
 
+  // nextSeat: 1..numPlayers-1 (Lawan k main setelah saya)
+  const ns = $('nextSeat');
+  const oldNs = parseInt(ns.value, 10);
+  ns.innerHTML = '';
+  for (let p = 1; p < numPlayers; p++) {
+    const opt = document.createElement('option');
+    opt.value = p;
+    opt.textContent = `Lawan ${p}`;
+    ns.appendChild(opt);
+  }
+  ns.value = oldNs >= 1 && oldNs < numPlayers ? oldNs : 1;
+
   updateSetupInfo();
   initOpponents();
 }
@@ -97,10 +206,10 @@ function updateSetupInfo() {
   const numPlayers = parseInt($('playerCount').value, 10);
   const cardsPerPlayer = parseInt($('cardsPerPlayer').value, 10);
   const distributed = numPlayers * cardsPerPlayer;
-  const boneyard = 28 - distributed;
+  const bone = Math.max(0, 28 - distributed);
 
   let info = `${numPlayers} pemain × ${cardsPerPlayer} kartu = ${distributed} dibagikan`;
-  info += boneyard > 0 ? ` | Cangkul: ${boneyard}` : ' | Semua kartu terpakai';
+  info += bone > 0 ? ` | Cangkul: ${bone}` : ' | Semua kartu terpakai';
   info += ` (maks ${getMaxCardsPerPlayer(numPlayers)}/pemain)`;
   $('setupInfo').textContent = info;
 }
@@ -160,6 +269,8 @@ function updateBoardDisplay() {
   if (re !== -1) { rightTag.textContent = `Kanan: ${re}`; rightTag.classList.remove('empty'); }
   else { rightTag.textContent = 'Kanan: -'; rightTag.classList.add('empty'); }
 
+  $('boneyardChip').textContent = `📦 ${boneyardCount()}`;
+
   if (state.boardTiles.length === 0) {
     chain.innerHTML = '<div class="board-empty"><div class="icon">🎲</div>' +
       '<div>Papan kosong — pilih kartu dari tangan Anda</div></div>';
@@ -195,8 +306,10 @@ function updateHandDisplay() {
 
   if (state.myHand.length === 0) {
     container.innerHTML = '<span class="placeholder">Klik "+ Pilih Kartu Saya" untuk menambahkan kartu</span>';
+    $('winBanner').classList.toggle('active', state.boardTiles.length > 0);
     return;
   }
+  $('winBanner').classList.remove('active');
 
   const le = getLeftEnd(), re = getRightEnd();
   const isFirstMove = le === -1 && re === -1;
@@ -205,7 +318,7 @@ function updateHandDisplay() {
     const [a, b] = parseKey(key);
     const playable = isFirstMove || a === le || b === le || a === re || b === re;
     const cls = playable ? 'playable' : 'unplayable';
-    return `<div class="hand-card ${cls}" data-key="${key}">` +
+    return `<div class="hand-card ${cls}" data-key="${key}" role="button" tabindex="0" aria-label="${tileLabel(key)}${playable ? ', bisa dimainkan' : ', tidak bisa dimainkan'}">` +
       `${renderPipsHTML(a, 'h')}<div class="h-div"></div>${renderPipsHTML(b, 'h')}</div>`;
   }).join('');
 
@@ -231,24 +344,11 @@ function markOpponentPass(oppIdx) {
     alert('Papan masih kosong — belum bisa mencatat PASS!');
     return;
   }
+  pushSnapshot();
   const opp = state.opponents[oppIdx];
   opp.passes.push({ left: le, right: re, boardLen: state.boardTiles.length });
   if (le !== -1 && !opp.eliminated.includes(le)) opp.eliminated.push(le);
   if (re !== -1 && !opp.eliminated.includes(re)) opp.eliminated.push(re);
-  updateOpponentsDisplay();
-  hideAnalysis();
-}
-
-function undoOpponentPass(oppIdx) {
-  const opp = state.opponents[oppIdx];
-  if (opp.passes.length === 0) return;
-  opp.passes.pop();
-  const newElim = [];
-  opp.passes.forEach((p) => {
-    if (p.left !== -1 && !newElim.includes(p.left)) newElim.push(p.left);
-    if (p.right !== -1 && !newElim.includes(p.right)) newElim.push(p.right);
-  });
-  opp.eliminated = newElim;
   updateOpponentsDisplay();
   hideAnalysis();
 }
@@ -269,6 +369,8 @@ function updateOpponentsDisplay() {
 
   const le = getLeftEnd(), re = getRightEnd();
   const boardActive = !(le === -1 && re === -1);
+  const engineOpps = state.lastAnalysis && Array.isArray(state.lastAnalysis.opponents)
+    ? state.lastAnalysis.opponents : null;
 
   const html = [];
   for (let i = 0; i < numOpp; i++) {
@@ -278,6 +380,12 @@ function updateOpponentsDisplay() {
     const cardCount = i === numOpp - 1
       ? totalOppCardsNow - perOpp * (numOpp - 1)
       : perOpp;
+
+    // held-known dari atribusi kartu lawan
+    const heldKeys = [];
+    state.allPlayed.forEach((k, idx) => {
+      if (state.playedBy[idx] === `opp${i + 1}`) heldKeys.push(k);
+    });
 
     let h = `<div class="opp-card${hasPass ? ' has-pass' : ''}">`;
     h += '<div class="opp-card-header">';
@@ -297,6 +405,27 @@ function updateOpponentsDisplay() {
       h += '</div>';
       h += `<div class="opp-passlog">Riwayat pass: ${opp.passes.map((p) => `[${p.left}|${p.right}]`).join(' → ')}</div>`;
     }
+    if (heldKeys.length > 0) {
+      h += '<div style="margin-top:3px;"><span class="opp-elim-label">🎯 Kartu yang dipastikan dimainkan:</span> ';
+      heldKeys.forEach((k) => {
+        const [x, y] = parseKey(k);
+        h += `<span class="opp-held-chip">${x}|${y}</span> `;
+      });
+      h += '</div>';
+    }
+
+    // profil kekayaan angka dari analisis engine terakhir
+    if (engineOpps && engineOpps[i]) {
+      const prof = engineOpps[i];
+      const domBits = (prof.dominant || []).map((d) =>
+        `<span class="wd">${d.num}</span> <span class="wm">(~${d.expected.toFixed(1)} kartu, ${d.pct.toFixed(0)}%)</span>`
+      ).join(' • ');
+      if (domBits) {
+        h += `<div class="opp-wealth">🔮 Diduga kuasai: ${domBits}`;
+        if (prof.doublesExpected > 0.15) h += ` • balak ≈ ${prof.doublesExpected.toFixed(1)}`;
+        h += '</div>';
+      }
+    }
 
     h += `<div class="opp-info">📊 Kemungkinan kartu: <strong>${possible.length}</strong> dari ${unknownKeys.length} kartu unknown`;
     if (hasPass && unknownKeys.length > 0) {
@@ -312,7 +441,7 @@ function updateOpponentsDisplay() {
     btn.addEventListener('click', () => {
       const idx = parseInt(btn.dataset.opp, 10);
       if (btn.dataset.action === 'pass') markOpponentPass(idx);
-      else undoOpponentPass(idx);
+      else undoLastAction();
     });
   });
 }
@@ -363,20 +492,15 @@ function updateRemainingDisplay() {
     return;
   }
 
-  const le = getLeftEnd(), re = getRightEnd();
-  const isFirstMove = le === -1 && re === -1;
-
   container.innerHTML = remaining.map((tile) => {
     const [a, b] = tile;
-    const playable = isFirstMove || a === le || b === le || a === re || b === re;
-    const cls = playable ? 'playable' : 'unplayable';
-    return `<div class="remaining-card ${cls}" data-key="${tileKey(tile)}">` +
+    return `<div class="remaining-card" data-key="${tileKey(tile)}" role="button" tabindex="0" aria-label="${tileLabel(tileKey(tile))}">` +
       `${renderPipsHTML(a, 'r')}<div class="r-div"></div>${renderPipsHTML(b, 'r')}</div>`;
   }).join('');
 
   container.querySelectorAll('.remaining-card').forEach((el) => {
     el.addEventListener('click', () => {
-      if (!state.isAnalyzing) handleCardPlay(el.dataset.key, 'remaining');
+      if (!state.isAnalyzing) openAttribModal(el.dataset.key);
     });
   });
 }
@@ -388,6 +512,7 @@ function updateAll() {
   updateNumberMap();
   updateQualityBanner();
   updateOpponentsDisplay();
+  saveState();
 }
 
 /* ---- modal: pilih kartu tangan ---- */
@@ -402,7 +527,7 @@ function openHandModal() {
     const isUsed = used[key] && !handSet[key];
     const isSelected = !!handSet[key];
     const cls = isUsed ? 'used' : isSelected ? 'selected' : '';
-    return `<div class="modal-tile ${cls}" data-key="${key}">` +
+    return `<div class="modal-tile ${cls}" data-key="${key}" role="button" aria-label="${tileLabel(key)}">` +
       `${renderPipsHTML(tile[0], 'mt')}<div class="mt-div"></div>${renderPipsHTML(tile[1], 'mt')}</div>`;
   }).join('');
 
@@ -455,6 +580,33 @@ function chooseEnd(side) {
   executePlay(key, source, side);
 }
 
+/* ---- modal atribusi: siapa yang main kartu lawan? (v3) ---- */
+function openAttribModal(key) {
+  state.pendingAttrib = { key };
+  const [a, b] = parseKey(key);
+  $('attribTile').innerHTML =
+    `<div class="preview-tile">${renderPipsHTML(a, 'p')}<div class="p-div"></div>${renderPipsHTML(b, 'p')}</div>`;
+
+  const numOpp = parseInt($('playerCount').value, 10) - 1;
+  let h = '';
+  for (let i = 0; i < numOpp; i++) {
+    h += `<button class="attrib-btn" data-who="opp${i + 1}">👤 Lawan ${i + 1}</button>`;
+  }
+  $('attribButtons').innerHTML = h;
+  $('attribButtons').querySelectorAll('.attrib-btn').forEach((btn) => {
+    btn.addEventListener('click', () => resolveAttribution(btn.dataset.who));
+  });
+  $('attribModal').classList.add('active');
+}
+
+function resolveAttribution(who) {
+  if (!state.pendingAttrib) return;
+  const { key } = state.pendingAttrib;
+  state.pendingAttrib = null;
+  $('attribModal').classList.remove('active');
+  executePlay(key, 'remaining', 'auto', who);
+}
+
 /* ---- alur main kartu ---- */
 function handleCardPlay(key, source) {
   const [a, b] = parseKey(key);
@@ -476,7 +628,7 @@ function handleCardPlay(key, source) {
   else executePlay(key, source, 'right');
 }
 
-function executePlay(key, source, side) {
+function executePlay(key, source, side, attributedTo) {
   const [a, b] = parseKey(key);
   const le = getLeftEnd(), re = getRightEnd();
 
@@ -484,6 +636,8 @@ function executePlay(key, source, side) {
     const idx = state.myHand.indexOf(key);
     if (idx >= 0) state.myHand.splice(idx, 1);
   }
+
+  pushSnapshot();
 
   const owner = source === 'hand' ? 'me' : 'opp';
   let oriented;
@@ -493,36 +647,35 @@ function executePlay(key, source, side) {
   } else if (side === 'left') {
     oriented = a === le ? [b, a] : [a, b];
     state.boardTiles.unshift({ tile: oriented, origKey: key, owner, source });
-  } else {
+  } else if (side === 'right') {
     oriented = a === re ? [a, b] : [b, a];
     state.boardTiles.push({ tile: oriented, origKey: key, owner, source });
+  } else {
+    // auto (kartu lawan): sambung ujung mana pun yang cocok, kiri dulu
+    if (a === le || b === le) {
+      oriented = a === le ? [b, a] : [a, b];
+      state.boardTiles.unshift({ tile: oriented, origKey: key, owner, source });
+    } else {
+      oriented = a === re ? [a, b] : [b, a];
+      state.boardTiles.push({ tile: oriented, origKey: key, owner, source });
+    }
   }
 
   state.allPlayed.push(key);
+  state.playedBy.push(source === 'hand' ? 'me' : (attributedTo || 'unknown'));
   updateAll();
   runAnalysis(); // analisis otomatis setelah setiap langkah
 }
 
-function undoLastMove() {
-  if (state.isAnalyzing || state.boardTiles.length === 0) return;
-
-  const last = state.boardTiles.pop();
-  const idx = state.allPlayed.indexOf(last.origKey);
-  if (idx >= 0) state.allPlayed.splice(idx, 1);
-  if (last.source === 'hand' && !state.myHand.includes(last.origKey)) {
-    state.myHand.push(last.origKey);
-  }
-
-  updateAll();
-  hideAnalysis();
-}
-
 function resetGame() {
   if (state.isAnalyzing) return;
+  pushSnapshot();
   state.myHand = [];
   state.boardTiles = [];
   state.allPlayed = [];
+  state.playedBy = [];
   state.opponents.forEach((o) => { o.passes = []; o.eliminated = []; });
+  state.lastAnalysis = null;
   updateAll();
   hideAnalysis();
   $('progressContainer').classList.remove('active');
@@ -533,15 +686,17 @@ function hideAnalysis() {
 }
 
 /* ---- API ke engine C++ (via server Python) ---- */
-async function apiPost(path, body) {
+async function apiPost(path, body, signal) {
   let res;
   try {
     res = await fetch(path, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
+      signal,
     });
   } catch (e) {
+    if (e.name === 'AbortError') throw e;
     throw new Error('Tidak bisa menghubungi server — apakah `python start.py` masih berjalan?');
   }
   let json;
@@ -554,6 +709,14 @@ async function apiPost(path, body) {
     throw new Error(json.error || `HTTP ${res.status}`);
   }
   return json;
+}
+
+function friendlyError(msg) {
+  return String(msg)
+    .replace(/invalid tile key: (\S+)/, (m, k) =>
+      `Kartu "${k}" tidak dikenali — pilih kartu dari daftar, jangan ketik manual.`)
+    .replace(/duplicate tile: (\S+)/, (m, k) =>
+      `Kartu "${k}" muncul dua kali — periksa tangan & papan Anda.`);
 }
 
 function buildAnalyzeRequest() {
@@ -573,7 +736,12 @@ function buildAnalyzeRequest() {
     rightEnd: getRightEnd(),
     myHand: state.myHand.slice(),
     played: state.allPlayed.slice(),
+    playedBy: state.playedBy.slice(),
     totalOppCards,
+    nextSeat: parseInt($('nextSeat').value, 10),
+    deadlockRule: $('deadlockRule').value,
+    tieRule: $('tieRule').value,
+    adversarial: $('adversarial').checked,
     opponents: state.opponents.map((o) => ({
       passes: o.passes.length,
       eliminated: o.eliminated.slice(),
@@ -600,24 +768,28 @@ async function runAnalysis() {
   }
 
   state.isAnalyzing = true;
+  state.abortCtl = new AbortController();
   const btn = $('analyzeBtn');
   btn.disabled = true;
-  btn.textContent = '⏳ ...';
+  btn.textContent = '✕ Batal';
 
   const req = buildAnalyzeRequest();
   const isFirstMove = req.leftEnd === -1 && req.rightEnd === -1;
   const hasPassData = state.opponents.some((o) => o.passes.length > 0);
+  const hasAttrib = state.playedBy.some((w) => w && w.startsWith('opp'));
 
   setProgress(
     30,
     '<span class="loading-icon">⏳</span> ' +
       (isFirstMove ? '🎯 Analisis Kartu Pertama' : '🎯 Menganalisis...'),
-    `${req.myHand.length} kartu × ${req.numSims} sim (engine C++)` +
-      (hasPassData ? ' • dengan data PASS lawan' : '')
+    `${req.myHand.length} kartu × ${req.numSims} sim (engine C++ v3)` +
+      (hasPassData ? ' • data PASS' : '') +
+      (hasAttrib ? ' • atribusi lawan' : '') +
+      (req.adversarial ? ' • mode teliti' : '')
   );
 
   try {
-    const data = await apiPost('/api/analyze', req);
+    const data = await apiPost('/api/analyze', req, state.abortCtl.signal);
     if (!data.moves || data.moves.length === 0) {
       showNoMoves();
     } else {
@@ -625,53 +797,52 @@ async function runAnalysis() {
       displayResults(data, isFirstMove, hasPassData);
     }
   } catch (err) {
-    const panel = $('analysisPanel');
-    panel.classList.add('active');
-    $('analysisResults').innerHTML =
-      `<div class="empty-state"><div class="icon">⚠️</div>` +
-      `<p><strong>Gagal menganalisis:</strong></p><p style="margin-top:5px;font-size:0.72rem;">${err.message}</p></div>`;
+    if (err.name === 'AbortError') {
+      setProgress(100, '🚫 Analisis dibatalkan', '');
+    } else {
+      const panel = $('analysisPanel');
+      panel.classList.add('active');
+      $('analysisResults').innerHTML =
+        `<div class="empty-state"><div class="icon">⚠️</div>` +
+        `<p><strong>Gagal menganalisis:</strong></p><p style="margin-top:5px;font-size:0.72rem;">${friendlyError(err.message)}</p></div>`;
+    }
   } finally {
     btn.disabled = false;
     btn.textContent = '🔬 Analisis';
     state.isAnalyzing = false;
-    setTimeout(() => $('progressContainer').classList.remove('active'), 700);
+    state.abortCtl = null;
+    setTimeout(() => $('progressContainer').classList.remove('active'), 900);
   }
+}
+
+function cancelAnalysis() {
+  if (state.abortCtl) state.abortCtl.abort();
 }
 
 function showNoMoves() {
   const panel = $('analysisPanel');
   panel.classList.add('active');
+  setProgress(100, '⚠️ Tidak ada langkah valid', '');
   $('analysisResults').innerHTML =
-    '<div class="empty-state"><div class="icon">😔</div>' +
-    '<p><strong>Tidak ada langkah valid!</strong></p>' +
-    '<p style="margin-top:5px;font-size:0.75rem;">Anda harus PASS (lewat).</p></div>';
+    '<div class="pass-cta"><strong>😔 Tidak ada langkah valid — Anda harus PASS (lewat).</strong><br>' +
+    'Jika yang lewat adalah <strong>lawan</strong>, tekan tombol ⏭ PASS di kartu lawan ' +
+    'agar sistem mencatat eliminasi angka → analisis berikutnya jadi jauh lebih akurat.<br>' +
+    'Jika giliran Anda kembali tanpa bisa main, catat PASS Anda dan lanjutkan permainan.</div>';
 }
 
 /* ---- render hasil analisis ---- */
-function scoreOf(r, isFirstMove) {
-  let s =
-    r.winRate * 100 +
-    r.domSupportScore * 0.6 +
-    r.trapScore * 0.8 +
-    r.blockScore * 0.7 -
-    r.selfTrapScore * 0.5 -
-    r.riskScore * 0.5 +
-    r.deadlockWinRate * 20 +
-    r.guaranteedBlocks.length * 8 +
-    r.avgOppPasses * 3;
-  if (isFirstMove && r.firstMoveSafety) s += r.firstMoveSafety.safetyRatio * 30;
-  return s;
-}
-
 function sortResults(moves, isFirstMove) {
-  const scored = moves.map((r) => ({ r, sc: scoreOf(r, isFirstMove) }));
-  scored.sort((x, y) => {
-    if (x.r.winRate >= 0.5 && y.r.winRate < 0.5) return -1;
-    if (x.r.winRate < 0.5 && y.r.winRate >= 0.5) return 1;
-    if (Math.abs(x.sc - y.sc) > 3) return y.sc - x.sc;
-    return x.r.riskScore - y.r.riskScore;
+  // engine sudah mengurutkan via rankScore; UI menambah bucket "aman" di atas
+  const withMeta = moves.map((r) => ({
+    r,
+    safe: r.winRate >= 0.5,
+    sc: r.rankScore !== undefined ? r.rankScore : 0,
+  }));
+  withMeta.sort((x, y) => {
+    if (x.safe !== y.safe) return x.safe ? -1 : 1;
+    return y.sc - x.sc;
   });
-  return scored.map((s) => s.r);
+  return withMeta.map((s) => s.r);
 }
 
 function makeMoveTileHTML(a, b) {
@@ -683,10 +854,19 @@ function displayResults(data, isFirstMove, hasPassData) {
   const div = $('analysisResults');
   panel.classList.add('active');
   div.innerHTML = '';
+  state.lastAnalysis = data;
 
   const results = sortResults(data.moves, isFirstMove);
   const best = results[0];
   const numSims = data.numSims;
+
+  // chips ringkasan mode
+  const chips = [];
+  if (hasPassData) chips.push('<span class="opp-held-chip">🔍 PASS</span>');
+  if (data.hasAttribution) chips.push('<span class="opp-held-chip">🎯 Atribusi</span>');
+  if (data.adversarial) chips.push('<span class="opp-held-chip">😈 Teliti</span>');
+  if (data.boneyardCount > 0) chips.push(`<span class="opp-held-chip">📦 Cangkul ${data.boneyardCount}</span>`);
+  $('analysisChips').innerHTML = chips.length ? ' ' + chips.join(' ') : '';
 
   if (isFirstMove) {
     div.innerHTML += '<div class="first-move-box"><h4>🎯 MODE: KARTU PERTAMA</h4>' +
@@ -731,6 +911,8 @@ function displayResults(data, isFirstMove, hasPassData) {
     else { bc = 'badge-risk'; bt = '⚠ RISIKO'; }
 
     const wp = (r.winRate * 100).toFixed(1);
+    const ciHalf = ((r.winHi - r.winLo) / 2 * 100).toFixed(1);
+    const ciText = `interval 95%: ${(r.winLo * 100).toFixed(1)}–${(r.winHi * 100).toFixed(1)}%`;
     const barC = r.winRate >= 0.5 ? 'green' : r.winRate >= 0.35 ? 'yellow' : 'red';
 
     let inner = '<div class="move-header">';
@@ -757,7 +939,7 @@ function displayResults(data, isFirstMove, hasPassData) {
     inner += `<div class="stat-box"><div class="val ${r.riskScore < 20 ? 'val-green' : r.riskScore < 40 ? 'val-yellow' : 'val-red'}">${r.riskScore.toFixed(0)}</div><div class="lbl">Risk</div></div>`;
     inner += '</div>';
 
-    inner += `<div class="comp-bar"><div class="bar-label"><span>🏆 Peluang Menang</span><span><strong>${wp}%</strong></span></div><div class="bar-track"><div class="bar-fill ${barC}" style="width:${wp}%"></div></div></div>`;
+    inner += `<div class="comp-bar"><div class="bar-label"><span>🏆 Peluang Menang <span class="ci-note">(${ciText})</span></span><span><strong>${wp}% ±${ciHalf}</strong></span></div><div class="bar-track"><div class="bar-fill ${barC}" style="width:${wp}%"></div></div></div>`;
 
     if (r.deadlockWinRate > 0.01) {
       inner += `<div class="comp-bar"><div class="bar-label"><span>⚖️ Menang lewat ADU</span><span>${(r.deadlockWinRate * 100).toFixed(1)}%</span></div><div class="bar-track"><div class="bar-fill orange" style="width:${r.deadlockWinRate * 100}%"></div></div></div>`;
@@ -840,6 +1022,32 @@ function displayResults(data, isFirstMove, hasPassData) {
   div.appendChild(tip);
 }
 
+/* ---- export / import sesi ---- */
+function exportSession() {
+  const blob = new Blob([JSON.stringify(serializeState(), null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const aEl = document.createElement('a');
+  aEl.href = url;
+  aEl.download = `domino-analisis-${new Date().toISOString().slice(0, 10)}.json`;
+  aEl.click();
+  URL.revokeObjectURL(url);
+}
+function importSession(file) {
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      if (restoreFrom(JSON.parse(reader.result))) {
+        alert('Sesi berhasil dimuat!');
+      } else {
+        alert('File bukan sesi Domino Analyzer v3 yang valid.');
+      }
+    } catch (e) {
+      alert('File tidak bisa dibaca sebagai JSON.');
+    }
+  };
+  reader.readAsText(file);
+}
+
 /* ---- init & event listeners ---- */
 $('playerCount').addEventListener('change', () => {
   updateCardsPerPlayerOptions();
@@ -856,10 +1064,28 @@ $('handModal').addEventListener('click', (e) => {
 });
 $('choiceLeft').addEventListener('click', () => chooseEnd('left'));
 $('choiceRight').addEventListener('click', () => chooseEnd('right'));
-$('analyzeBtn').addEventListener('click', runAnalysis);
-$('undoBtn').addEventListener('click', undoLastMove);
+$('attribUnknown').addEventListener('click', () => resolveAttribution('unknown'));
+$('analyzeBtn').addEventListener('click', () => {
+  if (state.isAnalyzing) cancelAnalysis();
+  else runAnalysis();
+});
+$('undoBtn').addEventListener('click', undoLastAction);
+$('exportBtn').addEventListener('click', exportSession);
+$('importBtn').addEventListener('click', () => $('importFile').click());
+$('importFile').addEventListener('change', (e) => {
+  if (e.target.files && e.target.files[0]) importSession(e.target.files[0]);
+  e.target.value = '';
+});
 $('resetBtn').addEventListener('click', resetGame);
 
 updateCardsPerPlayerOptions();
 initOpponents();
+loadState();
 updateAll();
+
+/* ---- PWA ---- */
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('sw.js').catch(() => { /* dev/offline file */ });
+  });
+}
