@@ -21,6 +21,8 @@ const state = {
   pending: null,     // { key, source } menunggu pilihan ujung
   pendingAttrib: null, // { key } menunggu atribusi pemain
   isAnalyzing: false,
+  liveMode: false,   // mode analisis otomatis (play/stop)
+  pendingRun: false, // ada permintaan analisis menunggu yang sedang berjalan
   abortCtl: null,    // AbortController analisis berjalan
   lastAnalysis: null,// respons engine terakhir (untuk panel profil lawan)
   timeline: [],      // snapshot untuk undo global (maks 100)
@@ -150,6 +152,22 @@ function pushSnapshot() {
   }));
   if (state.timeline.length > 100) state.timeline.shift();
 }
+/* ---- mode analisis LIVE (v3.2): play/stop, auto re-run tiap info baru ---- */
+function setLiveMode(on) {
+  state.liveMode = on;
+  const btn = $('analyzeBtn');
+  const chip = $('liveChip');
+  btn.classList.toggle('running', on);
+  chip.classList.toggle('active', on);
+  if (on) {
+    btn.textContent = '⏸ Jeda Live';
+    runAnalysis();
+  } else {
+    btn.textContent = '▶️ Analisis Live';
+    if (state.abortCtl) state.abortCtl.abort(); // hentikan run yang berjalan
+  }
+}
+
 function undoLastAction() {
   if (state.isAnalyzing || state.timeline.length === 0) return;
   const snap = JSON.parse(state.timeline.pop());
@@ -160,7 +178,7 @@ function undoLastAction() {
   state.opponents = snap.opponents;
   state.lastAnalysis = null;
   updateAll();
-  hideAnalysis();
+  runAnalysis(); // live: undo ikut memicu analisis ulang
 }
 
 /* ---- setup ---- */
@@ -357,7 +375,7 @@ function markOpponentPass(oppIdx) {
   if (le !== -1 && !opp.eliminated.includes(le)) opp.eliminated.push(le);
   if (re !== -1 && !opp.eliminated.includes(re)) opp.eliminated.push(re);
   updateOpponentsDisplay();
-  hideAnalysis();
+  runAnalysis(); // live: hasil ikut ter-update otomatis
 }
 
 function updateOpponentsDisplay() {
@@ -838,6 +856,7 @@ function executePlay(key, source, side, attributedTo) {
 function resetGame() {
   if (state.isAnalyzing) return;
   pushSnapshot();
+  // live mode tetap hidup: reset bukan alasan mematikan analisis otomatis
   state.myHand = [];
   state.boardTiles = [];
   state.allPlayed = [];
@@ -928,7 +947,8 @@ function setProgress(pct, text, detail) {
 
 /* ---- analisis ---- */
 async function runAnalysis() {
-  if (state.isAnalyzing || state.myHand.length === 0) return;
+  if (state.isAnalyzing) { state.pendingRun = true; return; } // antre: jalankan ulang setelah ini selesai
+  if (state.myHand.length === 0) return;
 
   const cardsPerPlayer = parseInt($('cardsPerPlayer').value, 10);
   if (state.myHand.length > cardsPerPlayer) {
@@ -939,8 +959,7 @@ async function runAnalysis() {
   state.isAnalyzing = true;
   state.abortCtl = new AbortController();
   const btn = $('analyzeBtn');
-  btn.disabled = true;
-  btn.textContent = '✕ Batal';
+  btn.textContent = state.liveMode ? '⏸ Jeda Live…' : '✕ Batal';
 
   const req = buildAnalyzeRequest();
   const isFirstMove = req.leftEnd === -1 && req.rightEnd === -1;
@@ -967,7 +986,7 @@ async function runAnalysis() {
     }
   } catch (err) {
     if (err.name === 'AbortError') {
-      setProgress(100, '🚫 Analisis dibatalkan', '');
+      setProgress(100, state.liveMode ? '⏸ Live dijeda' : '🚫 Analisis dibatalkan', '');
     } else {
       const panel = $('analysisPanel');
       panel.classList.add('active');
@@ -977,10 +996,15 @@ async function runAnalysis() {
     }
   } finally {
     btn.disabled = false;
-    btn.textContent = '🔬 Analisis';
+    btn.textContent = state.liveMode ? '⏸ Jeda Live' : '▶️ Analisis Live';
     state.isAnalyzing = false;
     state.abortCtl = null;
-    setTimeout(() => $('progressContainer').classList.remove('active'), 900);
+    if (state.liveMode && state.pendingRun) {
+      state.pendingRun = false;
+      setTimeout(() => runAnalysis(), 60); // jalankan antrean terbaru
+    } else {
+      setTimeout(() => $('progressContainer').classList.remove('active'), 900);
+    }
   }
 }
 
@@ -1240,10 +1264,7 @@ $('handModal').addEventListener('click', (e) => {
 $('choiceLeft').addEventListener('click', () => chooseEnd('left'));
 $('choiceRight').addEventListener('click', () => chooseEnd('right'));
 $('attribUnknown').addEventListener('click', () => resolveAttribution('unknown'));
-$('analyzeBtn').addEventListener('click', () => {
-  if (state.isAnalyzing) cancelAnalysis();
-  else runAnalysis();
-});
+$('analyzeBtn').addEventListener('click', () => setLiveMode(!state.liveMode));
 $('undoBtn').addEventListener('click', undoLastAction);
 $('exportBtn').addEventListener('click', exportSession);
 $('importBtn').addEventListener('click', () => $('importFile').click());
