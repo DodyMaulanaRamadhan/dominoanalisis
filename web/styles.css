@@ -363,3 +363,60 @@ header p{color:#8b949e;font-size:0.62rem;margin-top:2px;}
 .board-tile.ghost .b-pip{background:rgba(88,166,255,0.85);}
 .board-tile.ghost .board-divider-h,.board-tile.ghost .board-divider-v{background:rgba(88,166,255,0.55);}
 @media (prefers-reduced-motion:reduce){.hand-card.rec-glow,.board-tile.ghost{animation:none;box-shadow:0 0 9px rgba(88,166,255,0.8);}}
+
+/* ---- wrapper kolom (desktop layout) ----
+   Mobile: .col = display:contents (transparan) + order flex untuk
+   mempertahankan urutan panel asli: setup→banner→papan→tangan→lawan→
+   peta→sisa→aksi→progress→hasil.
+   Desktop ≥1024px: .col jadi kolom grid yang sesungguhnya (lihat bawah). */
+.app{display:flex;flex-direction:column;}
+.col{display:contents;}
+.col-left>*{order:1;}
+.col-center>*{order:2;}
+.col-right>*{order:3;}
+.actions-bar{order:4;}
+.progress-container{order:5;}
+#analysisPanel{order:6;}
+
+/* ---- DESKTOP LAYOUT (≥1024px): dashboard 3 kolom — mobile tidak berubah ----
+   Kolom kiri  : setup + banner + aksi + progress
+   Kolom tengah: papan + tangan + hasil analisis (2 kolom) — fokus utama
+   Kolom kanan : lawan + peta angka + kartu sisa (sticky) */
+@media (min-width:1024px){
+  html{font-size:17px;}
+  .app{display:grid;grid-template-columns:300px minmax(0,1fr) 380px;gap:14px;align-items:start;max-width:1560px;padding:12px 16px 40px;}
+  header{grid-column:1/-1;text-align:left;padding:4px 2px 8px;}
+  .col{display:flex;flex-direction:column;min-width:0;}
+  .col>*{order:0;}
+  .actions-bar,.progress-container,#analysisPanel{order:0;}
+
+  /* besar-besarkan kartu di semua panel */
+  .hand-card{width:64px;}
+  .opp-cand-card{width:42px;}
+  .opp-cand-card .r-pip,.remaining-card .r-pip{max-width:6px;max-height:6px;}
+  .board-tile.horizontal .board-tile-inner{width:92px;height:46px;}
+  .board-tile.vertical .board-tile-inner{width:46px;height:92px;}
+  .board-tile .b-pip{max-width:9px;max-height:9px;}
+  .board-chain{min-height:104px;gap:3px;}
+  .move-tile-v{width:48px;}
+
+  /* setup & aksi di kolom kiri */
+  .actions-bar{flex-wrap:wrap;}
+  .actions-bar .btn{flex:1 1 44%;}
+
+  /* hasil analisis: 2 kartu per baris; banner & tips full width */
+  #analysisResults{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 10px;align-items:start;}
+  #analysisResults>.first-move-box,#analysisResults>.dominance-panel,#analysisResults>.info-text,#analysisResults>.pass-cta,#analysisResults>.empty-state{grid-column:1/-1;}
+  .move-card{margin-bottom:10px;}
+
+  /* kolom kanan sticky: ikut saat scroll hasil analisis yang panjang */
+  .col-right{position:sticky;top:10px;max-height:calc(100vh - 20px);overflow-y:auto;overscroll-behavior:contain;}
+
+  /* hover halus khas pointer device */
+  .hand-card.playable:hover,.hand-card.rec-glow:hover{transform:translateY(-3px);}
+  .move-card:hover{border-color:#8b949e;}
+}
+@media (min-width:1500px){
+  html{font-size:18px;}
+  .app{grid-template-columns:320px minmax(0,1fr) 420px;gap:16px;}
+}

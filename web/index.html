@@ -17,6 +17,8 @@
       <span class="header-live" id="headerLive">⏸ LIVE</span></p>
   </header>
 
+  <!-- Kolom kiri (desktop): setup + banner + aksi + progress -->
+  <div class="col col-left">
   <!-- ===== SETUP ===== -->
   <div class="setup-panel">
     <div class="setup-row">
@@ -78,6 +80,25 @@
   <div class="quality-banner" id="qualityBanner"></div>
   <div class="win-banner" id="winBanner">🎉 <strong>TANGAN HABIS — ANDA MENANG!</strong> 🎉</div>
 
+  <!-- ===== AKSI ===== -->
+  <div class="actions-bar">
+    <button class="btn btn-analyze" id="analyzeBtn">▶️ Analisis Live</button>
+    <button class="btn btn-undo" id="undoBtn">↩️ Undo</button>
+    <button class="btn btn-undo" id="exportBtn">💾 Export</button>
+    <button class="btn btn-undo" id="importBtn">📂 Import</button>
+    <button class="btn btn-reset" id="resetBtn">🔄 Reset</button>
+  </div>
+  <input type="file" id="importFile" accept="application/json" style="display:none">
+
+  <div class="progress-container" id="progressContainer">
+    <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
+    <div class="progress-text" id="progressText">⏳ Memulai...</div>
+    <div class="progress-detail" id="progressDetail"></div>
+  </div>
+  </div><!-- /col-left -->
+
+  <!-- Kolom tengah (desktop): papan + tangan + hasil analisis -->
+  <div class="col col-center">
   <!-- ===== PAPAN ===== -->
   <div class="board-panel">
     <div class="board-label">
@@ -112,6 +133,15 @@
     </div>
   </div>
 
+  <!-- ===== HASIL ===== -->
+  <div class="analysis-panel" id="analysisPanel">
+    <div class="analysis-title">📊 Hasil Analisis <span class="live-chip" id="liveChip">🔴 LIVE</span><span id="analysisChips"></span></div>
+    <div id="analysisResults"></div>
+  </div>
+  </div><!-- /col-center -->
+
+  <!-- Kolom kanan (desktop): lawan + peta angka + kartu sisa -->
+  <div class="col col-right">
   <!-- ===== LAWAN ===== -->
   <div class="opponents-panel">
     <div class="opponents-title">👥 Lawan — Tracking &amp; Eliminasi</div>
@@ -139,28 +169,7 @@
     <div class="remaining-header" id="remainingHeader">📦 Kartu Sisa — klik = kartu lawan main / keluar (<span id="remainingCount">28</span>)</div>
     <div class="remaining-tiles" id="remainingTiles"></div>
   </div>
-
-  <!-- ===== AKSI ===== -->
-  <div class="actions-bar">
-    <button class="btn btn-analyze" id="analyzeBtn">▶️ Analisis Live</button>
-    <button class="btn btn-undo" id="undoBtn">↩️ Undo</button>
-    <button class="btn btn-undo" id="exportBtn">💾 Export</button>
-    <button class="btn btn-undo" id="importBtn">📂 Import</button>
-    <button class="btn btn-reset" id="resetBtn">🔄 Reset</button>
-  </div>
-  <input type="file" id="importFile" accept="application/json" style="display:none">
-
-  <div class="progress-container" id="progressContainer">
-    <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
-    <div class="progress-text" id="progressText">⏳ Memulai...</div>
-    <div class="progress-detail" id="progressDetail"></div>
-  </div>
-
-  <!-- ===== HASIL ===== -->
-  <div class="analysis-panel" id="analysisPanel">
-    <div class="analysis-title">📊 Hasil Analisis <span class="live-chip" id="liveChip">🔴 LIVE</span><span id="analysisChips"></span></div>
-    <div id="analysisResults"></div>
-  </div>
+  </div><!-- /col-right -->
 
 </div>
 
