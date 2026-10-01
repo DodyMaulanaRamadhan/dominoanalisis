@@ -38,8 +38,16 @@ header p{color:#8b949e;font-size:0.62rem;margin-top:2px;}
 .board-ends{display:flex;justify-content:space-between;margin-bottom:6px;}
 .board-end-tag{background:#0d1117;border:1px solid #58a6ff;border-radius:6px;padding:4px 10px;font-size:0.7rem;font-weight:700;color:#58a6ff;}
 .board-end-tag.empty{border-color:#30363d;color:#484f58;}
-.board-scroll{overflow-x:auto;overflow-y:hidden;padding:10px 4px;-webkit-overflow-scrolling:touch;}
-.board-chain{display:flex;align-items:center;min-height:80px;gap:2px;min-width:min-content;}
+.board-scroll{overflow:auto;max-height:300px;padding:10px 4px;-webkit-overflow-scrolling:touch;}
+/* susunan ular (v3.6): baris ditumpuk dari BAWAH ke atas (column-reverse),
+   arah bergantian membentuk S. Pembalikan urutan & pencerminan kartu baris
+   ganjil dilakukan di app.js (layoutSnakeChain). Semua kartu rebah — yang
+   berdiri hanya kartu pertama dikeluarkan. */
+.board-chain{display:flex;flex-direction:column-reverse;align-items:flex-start;width:100%;min-height:80px;gap:2px;padding-top:14px;padding-bottom:16px;}
+/* baris rata-BAWAH seperti domino meja: kartu siku tikungan & kartu pertama
+   berdiri di atas garis baris, kartu rebah menempel garis bawah — ujung
+   sambung antar baris hanya terpisah gap 2px (nyatu). */
+.board-row{display:flex;align-items:flex-end;gap:2px;}
 
 .board-tile{flex-shrink:0;}
 .board-tile-inner{display:flex;background:#1a1f27;border:2px solid #484f58;border-radius:6px;overflow:hidden;}
@@ -356,12 +364,24 @@ header p{color:#8b949e;font-size:0.62rem;margin-top:2px;}
 .hand-card.rec-glow::after{content:'⭐ MAIN';position:absolute;top:0;right:0;background:#58a6ff;color:#04121f;font-size:0.42rem;font-weight:800;padding:1px 4px;border-radius:0 0 0 6px;letter-spacing:0.02em;pointer-events:none;}
 .hand-card.rec-glow:hover{box-shadow:0 0 12px rgba(88,166,255,1),0 0 24px rgba(88,166,255,0.7);}
 /* siluet penempatan: kartu putus-putus biru + label sisi (kiri/kanan/tengah) */
-.rec-slot{display:flex;flex-direction:column;align-items:center;gap:3px;flex-shrink:0;}
-.rec-slot-tag{font-size:0.5rem;font-weight:800;color:#58a6ff;background:rgba(88,166,255,0.12);border:1px solid rgba(88,166,255,0.55);border-radius:5px;padding:1px 5px;white-space:nowrap;letter-spacing:0.02em;}
+.rec-slot{display:flex;flex-direction:column;align-items:center;gap:3px;flex-shrink:0;position:relative;}
+/* label absolut: tinggi slot = tinggi kartu saja agar sejajar kartu lain;
+   baris bawah label di bawah kartu, baris teratas di ATAS kartu (aman via
+   padding-top chain, tak menabrak baris lain). */
+.rec-slot-tag{font-size:0.5rem;font-weight:800;color:#58a6ff;background:rgba(88,166,255,0.12);border:1px solid rgba(88,166,255,0.55);border-radius:5px;padding:1px 5px;white-space:nowrap;letter-spacing:0.02em;position:absolute;left:50%;transform:translateX(-50%);top:100%;margin-top:3px;z-index:2;}
+.board-row:last-child .rec-slot-tag{top:auto;bottom:100%;margin-top:0;margin-bottom:3px;}
 .board-tile.ghost{animation:recGlow 1.1s ease-in-out infinite alternate;border-radius:6px;}
 .board-tile.ghost .board-tile-inner{background:rgba(88,166,255,0.07);border:2px dashed #58a6ff;}
 .board-tile.ghost .b-pip{background:rgba(88,166,255,0.85);}
 .board-tile.ghost .board-divider-h,.board-tile.ghost .board-divider-v{background:rgba(88,166,255,0.55);}
+/* kartu pertama (awal rantai): tema emas + garis diagonal + bintang di sel
+   tengah-atas (sel itu SELALU kosong untuk semua nilai 0..6) agar berbeda
+   jelas dari kartu siku tikungan yang juga berdiri. Warna mata tetap warna
+   pemilik (hijau/merah/biru) supaya info kepemilikan tidak hilang. */
+.board-tile.first-card{position:relative;border-radius:6px;box-shadow:0 0 0 2px rgba(210,153,34,0.5),0 0 14px rgba(210,153,34,0.6);}
+.board-tile.first-card .board-tile-inner{border-color:#d29922;background:repeating-linear-gradient(45deg,rgba(210,153,34,0.16) 0 4px,rgba(210,153,34,0.02) 4px 8px),#1a1f27;}
+.board-tile.first-card .board-divider-h,.board-tile.first-card .board-divider-v{background:#d29922;}
+.board-tile.first-card::after{content:'★';position:absolute;top:5px;left:50%;transform:translateX(-50%);font-size:0.45rem;line-height:1;color:#f0c674;text-shadow:0 0 3px rgba(0,0,0,0.85);pointer-events:none;z-index:3;}
 @media (prefers-reduced-motion:reduce){.hand-card.rec-glow,.board-tile.ghost{animation:none;box-shadow:0 0 9px rgba(88,166,255,0.8);}}
 
 /* ---- wrapper kolom (desktop layout) ----
@@ -397,7 +417,9 @@ header p{color:#8b949e;font-size:0.62rem;margin-top:2px;}
   .board-tile.horizontal .board-tile-inner{width:92px;height:46px;}
   .board-tile.vertical .board-tile-inner{width:46px;height:92px;}
   .board-tile .b-pip{max-width:9px;max-height:9px;}
+  .board-scroll{max-height:360px;}
   .board-chain{min-height:104px;gap:3px;}
+  .board-row{gap:3px;}
   .move-tile-v{width:48px;}
 
   /* setup & aksi di kolom kiri */
