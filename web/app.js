@@ -338,38 +338,172 @@ function getRecommendation() {
 
 // Siluet kartu rekomendasi: kartu putus-putus biru + label sisi penempatan,
 // diorientasikan agar setengah yang cocok menyentuh ujung papan.
-function makeRecGhostHTML(rec) {
+// `flip` = dicerminkan (setengah pencocok pindah sisi) untuk baris ganjil ular.
+// Rebah seperti kartu lain; berdiri HANYA saat papan kosong (dia calon kartu
+// pertama). `minWidth` = lebar slot agar label nowrap tak melebihi slot.
+function makeRecGhostHTML(rec, flip, minWidth) {
   const le = getLeftEnd(), re = getRightEnd();
   let x, y;
   if (le === -1) { x = rec.a; y = rec.b; }                              // papan kosong
   else if (rec.side === 'left') { x = rec.a === le ? rec.b : rec.a; y = le; } // kanan-kiri bertemu
   else { x = re; y = rec.a === re ? rec.b : rec.a; }                    // kiri-kanan bertemu
-  const orientClass = x === y ? 'vertical' : 'horizontal';
-  const divider = x === y
+  if (flip) { const t = x; x = y; y = t; }
+  const vertical = le === -1 && re === -1; // papan kosong: calon kartu pertama
+  const divider = vertical
     ? '<div class="board-divider-v"></div>'
     : '<div class="board-divider-h"></div>';
-  const label = rec.side === 'left' ? '⬅ TARUH DI KIRI'
-    : rec.side === 'right' ? 'TARUH DI KANAN ➡'
-    : '🎯 TARUH DI TENGAH';
-  return `<div class="rec-slot" role="img" aria-label="Siluet rekomendasi: ${esc(label)}">` +
-    `<div class="board-tile ${orientClass} ghost"><div class="board-tile-inner">` +
+  const label = recGhostLabel(rec);
+  return `<div class="rec-slot"${minWidth ? ` style="min-width:${minWidth}px"` : ''} role="img" aria-label="Siluet rekomendasi: ${esc(label)}">` +
+    `<div class="board-tile ${vertical ? 'vertical' : 'horizontal'} ghost"><div class="board-tile-inner">` +
     `${renderPipsHTML(x, 'b')}${divider}${renderPipsHTML(y, 'b')}</div></div>` +
     `<div class="rec-slot-tag">${esc(label)}</div></div>`;
 }
 
+function recGhostLabel(rec) {
+  return rec.side === 'left' ? '⬅ TARUH DI KIRI'
+    : rec.side === 'right' ? 'TARUH DI KANAN ➡'
+    : '🎯 TARUH DI TENGAH';
+}
+
+/* ---- layout ular (v3.6): rantai membentuk huruf S ----
+   Baris memanjang ke kanan sampai mentok lebar papan, lalu naik satu baris
+   dengan arah berlawanan (boustrophedon) — menyerupai ular. Baris pertama
+   (kartu terawal) di BAWAH, rantai tumbuh ke atas.
+   Tiap item = { w, html(mode) }: `w` = lebar nyata kartu supaya pembagian
+   baris di JS persis sama dengan baris yang tampil. Kartu balak (1-1, 2-2,
+   dst.) REBAH seperti kartu lain; yang BERDIRI hanya (1) kartu pertama yang
+   dikeluarkan dan (2) kartu siku di tikungan/ujung baris. Baris ganjil
+   dibalik urutannya DAN tiap kartunya dicerminkan sehingga angka yang
+   bersambung tetap bertumpuk rapat di tikungan.
+   CSS: .board-chain = kolom terbalik (baris terakhir di atas). */
+function snakeTileWidth() {
+  return window.matchMedia('(min-width:1024px)').matches ? 92 : 68;
+}
+function snakeVertWidth() {
+  return window.matchMedia('(min-width:1024px)').matches ? 46 : 34;
+}
+function snakeGap() {
+  return window.matchMedia('(min-width:1024px)').matches ? 3 : 2;
+}
+function snakeAvailWidth(extra) {
+  const scroll = $('boardScroll');
+  const avail = (scroll ? scroll.clientWidth : window.innerWidth) - 24 - (extra || 0);
+  return Math.max(snakeTileWidth(), avail);
+}
+
+// Bagi item jadi baris: tambah kartu selama masih muat → baris mentok kanan.
+function packSnakeRows(items, avail) {
+  const gap = snakeGap();
+  const rows = [];
+  let row = [], w = 0;
+  items.forEach((it) => {
+    const add = row.length ? gap + it.w : it.w;
+    if (row.length && w + add > avail) { rows.push(row); row = [it]; w = it.w; }
+    else { row.push(it); w += add; }
+  });
+  if (row.length) rows.push(row);
+  return rows;
+}
+
+function layoutSnakeChain(chain, items) {
+  let rows = packSnakeRows(items, snakeAvailWidth());
+  const paint = () => {
+    const gap = snakeGap();
+    const vert = snakeVertWidth();
+    // Perkiraan lebar tiap baris: kartu TERAKHIR baris non-final berdiri
+    // sebagai SIKU (horizontal 68→34) supaya posisi tikungan akurat.
+    const estWidths = rows.map((row, ri) => {
+      let w = row.reduce((s, it) => s + it.w, 0) + gap * (row.length - 1);
+      const last = row[row.length - 1];
+      if (ri < rows.length - 1 && !last.ghost && last.w > vert) w -= last.w - vert;
+      return w;
+    });
+    // Posisi x zigzag: tepi tikungan kanan/kiri disamakan antar baris berurutan
+    // agar kartu siku tersambung persis di bawah kartu pertama baris berikutnya.
+    const place = (widths) => {
+      const room = chain.clientWidth || snakeAvailWidth();
+      const pos = [];
+      rows.forEach((row, ri) => {
+        const w = widths[ri];
+        let s, e;
+        if (ri === 0) { s = 0; e = w; }
+        else if (ri % 2 === 1) { e = pos[ri - 1].e; s = e - w; }  // tikungan kanan
+        else { s = pos[ri - 1].s; e = s + w; }                    // tikungan kiri
+        pos.push({ s, e });
+      });
+      // Geser SELURUH ular agar muat (bukan per baris — clamp per baris
+      // merusak kesejajaran siku; luapan sisa ditangani loop koreksi).
+      const maxE = Math.max(...pos.map((p) => p.e));
+      const minS = Math.min(...pos.map((p) => p.s));
+      let shift = maxE > room ? maxE - room : 0;
+      if (minS - shift < 0) shift = minS;
+      if (shift) pos.forEach((p) => { p.s -= shift; p.e -= shift; });
+      return pos;
+    };
+    const applyPos = (widths) => {
+      const pos = place(widths);
+      [...chain.children].forEach((el, i) => {
+        if (el.classList.contains('board-row')) el.style.marginLeft = `${Math.round(pos[i].s)}px`;
+      });
+    };
+    chain.innerHTML = rows.map((row, ri) => {
+      const flip = ri % 2 === 1;
+      const isLastRow = ri === rows.length - 1;
+      const cells = row.map((it, idx) => {
+        const corner = !isLastRow && idx === row.length - 1;   // siku tikungan
+        return it.html(corner ? 'corner' : flip ? 'flip' : 'normal');
+      });
+      if (flip) cells.reverse();
+      return `<div class="board-row">${cells.join('')}</div>`;
+    }).join('');
+    applyPos(estWidths);
+    // Ukur lebar NYATA tiap baris lalu posisikan ulang: lebar label siluet
+    // hanya perkiraan, padahal tikungan harus bertemu persis (presisi zigzag).
+    const realWidths = [...chain.querySelectorAll('.board-row')].map((r) => r.getBoundingClientRect().width);
+    applyPos(realWidths);
+  };
+  paint();
+  // Kalau masih ada baris meluber, susun ulang dengan lebar acuan lebih kecil.
+  for (let i = 0; i < 2 && chain.scrollWidth > chain.clientWidth + 1; i++) {
+    rows = packSnakeRows(items, snakeAvailWidth(chain.scrollWidth - chain.clientWidth + 4));
+    paint();
+  }
+}
+
+// Susun ulang susunan ular saat ukuran layar berubah (rotasi HP, resize).
+let snakeResizeTimer = 0;
+window.addEventListener('resize', () => {
+  clearTimeout(snakeResizeTimer);
+  snakeResizeTimer = setTimeout(() => updateBoardDisplay(), 150);
+});
+
+// Lebar kolom papan bisa berubah tanpa event window (mis. panel hasil analisis
+// selesai dirender & grid menyusut) — pantau langsung kontainernya.
+let snakeLastScrollW = 0;
+if (window.ResizeObserver) {
+  new ResizeObserver((entries) => {
+    const w = Math.round(entries[0].contentRect.width);
+    if (snakeLastScrollW && Math.abs(w - snakeLastScrollW) > 4) updateBoardDisplay();
+    snakeLastScrollW = w;
+  }).observe($('boardScroll'));
+}
+
 // Pastikan siluet rekomendasi terlihat di layar; kalau tidak ada siluet,
-// perilaku lama: auto-scroll ke ujung kanan.
+// tampilkan ujung rantai terbaru (ular tumbuh ke atas -> scrollTop 0).
 function scrollBoardToRecommendation(chain, rec) {
   const scroll = $('boardScroll');
   setTimeout(() => {
     const slot = rec ? chain.querySelector('.rec-slot') : null;
     if (slot) {
       const sr = slot.getBoundingClientRect(), cr = scroll.getBoundingClientRect();
-      if (sr.left < cr.left) { scroll.scrollLeft += sr.left - cr.left - 8; return; }
-      if (sr.right > cr.right) { scroll.scrollLeft += sr.right - cr.right + 8; }
+      if (sr.top < cr.top) {
+        scroll.scrollTop = Math.max(0, scroll.scrollTop - (cr.top - sr.top + 8));
+        return;
+      }
+      if (sr.bottom > cr.bottom) { scroll.scrollTop += sr.bottom - cr.bottom + 8; return; }
       return; // sudah terlihat — jangan menarik scroll
     }
-    scroll.scrollLeft = scroll.scrollWidth;
+    scroll.scrollTop = 0;
   }, 50);
 }
 
@@ -401,23 +535,62 @@ function updateBoardDisplay() {
     return;
   }
 
-  const html = state.boardTiles.map((bt) => {
+  // tiap item: lebar nyata + cara render (mode: normal | flip | corner).
+  // Kartu pertama = yang ditandai `first` (permainan baru), atau untuk sesi
+  // lama tanpa penanda: kartu paling awal di daftar kronologis `allPlayed`.
+  // PENTING: boardTiles[0] BUKAN kartu pertama — kartu yang dimainkan ke kiri
+  // di-unshift sesudahnya sehingga duduk di depan array.
+  let firstIdx = state.boardTiles.findIndex((bt) => bt.first === true);
+  if (firstIdx === -1) {
+    const k = state.allPlayed[0];
+    firstIdx = k === undefined ? 0 : state.boardTiles.findIndex((bt) => bt.origKey === k);
+    if (firstIdx === -1) firstIdx = 0;
+  }
+  const tileItem = (bt, i) => {
     const [a, b] = bt.tile;
     const ownerClass = bt.owner === 'me' ? 'my-tile' : bt.owner === 'opp' ? 'opp-tile' : 'first-tile';
-    const orientClass = a === b ? 'vertical' : 'horizontal';
-    const divider = a === b
-      ? '<div class="board-divider-v"></div>'
-      : '<div class="board-divider-h"></div>';
-    return `<div class="board-tile ${orientClass} ${ownerClass}">` +
-      `<div class="board-tile-inner">${renderPipsHTML(a, 'b')}${divider}${renderPipsHTML(b, 'b')}</div></div>`;
-  }).join('');
+    const standing = i === firstIdx;
+    // `isFirstCard` → kelas `first-card`: penanda emas + bintang agar kartu
+    // awal rantai langsung terlihat berbeda dari kartu siku tikungan.
+    const tileHTML = (x, y, vertical, isFirstCard) => {
+      const orientClass = vertical ? 'vertical' : 'horizontal';
+      const divider = vertical
+        ? '<div class="board-divider-v"></div>'
+        : '<div class="board-divider-h"></div>';
+      return `<div class="board-tile ${orientClass} ${ownerClass}${isFirstCard ? ' first-card' : ''}">` +
+        `<div class="board-tile-inner">${renderPipsHTML(x, 'b')}${divider}${renderPipsHTML(y, 'b')}</div></div>`;
+    };
+    return {
+      w: standing ? snakeVertWidth() : snakeTileWidth(),
+      html: (mode) => {
+        // siku tikungan: setengah ujung-sambung (b) di ATAS agar menempel
+        // kartu pertama baris berikutnya (dipisah gap baris saja).
+        if (mode === 'corner') return tileHTML(b, a, true, standing);
+        // kartu pertama berdiri [a di atas / b di bawah]: setengah ujung-
+        // sambungnya (b) sepita dengan kartu rebah di sebelahnya.
+        if (standing) return tileHTML(a, b, true, true);
+        const [x, y] = mode === 'flip' ? [b, a] : [a, b];
+        return tileHTML(x, y, false, false);         // selain itu: rebah
+      },
+    };
+  };
+  const ghostItem = (r) => {
+    // label siluet nowrap: 0.5rem bold ≈ 5px/karakter + padding & border
+    const w = Math.max(snakeTileWidth(), recGhostLabel(r).length * 5 + 16);
+    return {
+      ghost: true,
+      w,
+      html: (mode) => makeRecGhostHTML(r, mode === 'flip', w),
+    };
+  };
 
   // siluet rekomendasi di sisi yang benar (kiri / kanan)
-  let full = html;
-  if (rec && rec.side === 'left') full = makeRecGhostHTML(rec) + html;
-  else if (rec) full = html + makeRecGhostHTML(rec);
+  const items = [];
+  if (rec && rec.side === 'left') items.push(ghostItem(rec));
+  state.boardTiles.forEach((bt, i) => items.push(tileItem(bt, i)));
+  if (rec && rec.side !== 'left') items.push(ghostItem(rec));
 
-  chain.innerHTML = full;
+  layoutSnakeChain(chain, items);
   status.textContent = `${state.boardTiles.length} kartu di papan`;
   scrollBoardToRecommendation(chain, rec);
 }
@@ -944,7 +1117,8 @@ function executePlay(key, source, side, attributedTo) {
   let oriented;
   if (side === 'first') {
     oriented = [a, b];
-    state.boardTiles.push({ tile: oriented, origKey: key, owner, source });
+    // tandai kartu pembuka — satu-satunya kartu yang berdiri di papan
+    state.boardTiles.push({ tile: oriented, origKey: key, owner, source, first: true });
   } else if (side === 'left') {
     oriented = a === le ? [b, a] : [a, b];
     state.boardTiles.unshift({ tile: oriented, origKey: key, owner, source });
