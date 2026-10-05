@@ -320,6 +320,47 @@ class TestServerLive(unittest.TestCase):
         self.assertNotIn("<img", data["error"])
         self.assertIn("elemen ke-1", data["error"])
 
+    def test_error_never_returns_http_200(self):
+        # Regresi: engine_command() dulu selalu dikirim dengan status 200
+        # walau isinya {"ok": false}. Konsumen luar (curl, skrip, monitor)
+        # hanya bisa rely pada status code -> 200 berarti "sukses" palsu.
+        cases = [
+            # (payload, status yang diharapkan)
+            (self.simple_payload(numPlayers=99), 400),        # validasi server
+            (self.simple_payload(deadlockRule="ngawur"), 400), # validasi server
+            (self.simple_payload(myHand=["<img src=x>"]), 400),
+            ({"cmd": "analyze"}, 400),                          # field inti hilang
+            # tieRule nakal: LOLOS validasi server, ditolak engine — inilah
+            # kasus yang dulu keluar sebagai HTTP 200 + ok:false.
+            (self.simple_payload(tieRule="ngawur"), 400),
+        ]
+        for payload, want in cases:
+            status, data = http_post(self.port, "/api/analyze", payload)
+            self.assertEqual(status, want, f"payload={payload}")
+            self.assertFalse(data["ok"], f"payload={payload}")
+            self.assertNotEqual(status, 200, f"payload={payload}")
+
+    def test_ok_false_body_always_paired_with_non_200(self):
+        # Syarat yang lebih umum: kapan pun body ok:false, status != 200.
+        payloads = [
+            self.simple_payload(numPlayers=99),
+            self.simple_payload(deadlockRule="ngawur"),
+            {"cmd": "analyze"},
+            {"cmd": "analyze", "numPlayers": 4, "cardsPerPlayer": 7,
+             "numSims": 50, "seed": 3, "leftEnd": -1, "rightEnd": -1,
+             "myHand": [], "played": [], "opponents": [{}] * 3},
+        ]
+        for p in payloads:
+            status, data = http_post(self.port, "/api/analyze", p)
+            if data.get("ok") is False:
+                self.assertGreaterEqual(status, 400, f"payload={p}")
+                self.assertLess(status, 600, f"payload={p}")
+
+    def test_unknown_endpoint_and_method_still_4xx(self):
+        status, data = http_post(self.port, "/api/tidak-ada", {})
+        self.assertEqual(status, 404)
+        self.assertFalse(data["ok"])
+
     def test_meta_only_real_tiles(self):
         # INFO-8: dulu menghasilkan tile mustahil "0-7".."6-7" (35 entri)
         status, data = http_post(self.port, "/api/meta",

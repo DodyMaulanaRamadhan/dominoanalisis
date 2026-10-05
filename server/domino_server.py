@@ -94,10 +94,18 @@ def normalize_tile_list(value) -> tuple[list[str] | None, str]:
     return out, ""
 
 
-def engine_command(payload: dict) -> dict:
-    """Send a JSON payload to the C++ engine, return parsed JSON output."""
+def engine_command(payload: dict) -> tuple[dict, HTTPStatus]:
+    """Send a JSON payload to the C++ engine.
+
+    Return (result, status). `result` is what the engine produced (or an error
+    dict we synthesised); `status` is the HTTP status the caller MUST send —
+    never 200 for a failed command, so external clients can branch on the
+    status code alone instead of having to parse the body.
+    """
     if not ENGINE.exists():
-        return {"ok": False, "error": "engine belum di-build. Jalankan: python tools/build_engine.py"}
+        return ({"ok": False,
+                 "error": "engine belum di-build. Jalankan: python tools/build_engine.py"},
+                HTTPStatus.SERVICE_UNAVAILABLE)
     try:
         proc = subprocess.run(
             [str(ENGINE)],
@@ -106,17 +114,26 @@ def engine_command(payload: dict) -> dict:
             timeout=300,
         )
     except subprocess.TimeoutExpired:
-        return {"ok": False, "error": "engine timeout (>300s)"}
+        return ({"ok": False, "error": "engine timeout (>300s)"},
+                HTTPStatus.GATEWAY_TIMEOUT)
     if proc.returncode != 0:
         # Detail crash hanya untuk log server — jangan bocorkan ke klien.
         print(f"[engine] exit {proc.returncode}: "
               f"{proc.stderr.decode(errors='replace')[:400]}", file=sys.stderr)
-        return {"ok": False,
-                "error": f"engine error (exit {proc.returncode}) — detail ada di log server"}
+        return ({"ok": False,
+                 "error": f"engine error (exit {proc.returncode}) — detail ada di log server"},
+                HTTPStatus.INTERNAL_SERVER_ERROR)
     try:
-        return json.loads(proc.stdout.decode("utf-8"))
+        out = json.loads(proc.stdout.decode("utf-8"))
     except json.JSONDecodeError:
-        return {"ok": False, "error": "engine menghasilkan output tidak valid"}
+        return ({"ok": False, "error": "engine menghasilkan output tidak valid"},
+                HTTPStatus.BAD_GATEWAY)
+    # Engine berjalan tapi menolak/menolak-logika -> kesalahan permintaan (4xx),
+    # BUKAN kegagalan server. Body tetap ok:false supaya UI yang hanya
+    # membaca `ok` tetap menampilkan pesan errornya.
+    if isinstance(out, dict) and out.get("ok") is False:
+        return (out, HTTPStatus.BAD_REQUEST)
+    return (out, HTTPStatus.OK)
 
 
 def validate_analyze(req: dict) -> str | None:
@@ -342,9 +359,14 @@ class Handler(BaseHTTPRequestHandler):
             if err:
                 self._send_json({"ok": False, "error": err}, HTTPStatus.BAD_REQUEST)
                 return
-            self._send_json(engine_command(body))
+            result, status = engine_command(body)
+            self._send_json(result, status)
         elif path == "/api/selftest":
-            self._send_json(engine_command({"cmd": "selftest"}))
+            # Self-test gagal = engine bermasalah, bukan salah permintaan.
+            result, status = engine_command({"cmd": "selftest"})
+            if status == HTTPStatus.OK and result.get("ok") is False:
+                status = HTTPStatus.INTERNAL_SERVER_ERROR
+            self._send_json(result, status)
         elif path == "/api/meta":
             for field in ("myHand", "played"):
                 norm, err = normalize_tile_list(body.get(field))
