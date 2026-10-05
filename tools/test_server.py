@@ -246,6 +246,8 @@ class TestServerLive(unittest.TestCase):
 
     def test_played_by_contradiction_rejected(self):
         # opp1 yang di-PASS atas angka 3 tidak mungkin memainkan 3-5
+        if not ds.ENGINE.exists():
+            self.skipTest("engine belum di-build")
         payload = {
             "cmd": "analyze", "numPlayers": 4, "cardsPerPlayer": 7,
             "numSims": 50, "seed": 7, "leftEnd": 3, "rightEnd": 5,
@@ -290,7 +292,9 @@ class TestServerLive(unittest.TestCase):
         status, data = http_post(self.port, "/api/analyze", self.simple_payload(),
                                  extra_headers={"Origin": "http://evil.com"})
         self.assertEqual(status, 400)
-        # positif-kontrol: origin == Host tetap diterima
+        # positif-kontrol: origin == Host tetap diterima (butuh engine)
+        if not ds.ENGINE.exists():
+            self.skipTest("engine belum di-build")
         status, data = http_post(self.port, "/api/analyze", self.simple_payload(),
                                  extra_headers={"Origin": f"http://127.0.0.1:{self.port}"})
         self.assertEqual(status, 200)
