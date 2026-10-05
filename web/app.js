@@ -376,18 +376,37 @@ function recGhostLabel(rec) {
    dibalik urutannya DAN tiap kartunya dicerminkan sehingga angka yang
    bersambung tetap bertumpuk rapat di tikungan.
    CSS: .board-chain = kolom terbalik (baris terakhir di atas). */
+/* Ukuran kartu papan BISA MENGECIL otomatis: snakeScale < 1 dipakai saat
+   jumlah kartu sudah banyak dan papan tidak cukup kalau ukurannya normal
+   (lihat fitBoardScale). semua ukuran turunan (kartu berdiri, pips, garis)
+   dihitung dari satu nilai ini, di CSS lewat variabel --tw. */
+const MIN_TILE_SCALE = 0.5;
+let snakeScale = 1;
+
 function snakeTileWidth() {
-  return window.matchMedia('(min-width:1024px)').matches ? 92 : 68;
+  const base = window.matchMedia('(min-width:1024px)').matches ? 92 : 68;
+  return base * snakeScale;
 }
 function snakeVertWidth() {
-  return window.matchMedia('(min-width:1024px)').matches ? 46 : 34;
+  return snakeTileWidth() / 2;   // separuh persis (sama dengan calc(--tw / 2) di CSS)
 }
 function snakeGap() {
   return window.matchMedia('(min-width:1024px)').matches ? 3 : 2;
 }
+
+// fraksi lebar papan yang dipakai baris: 1 = penuh (kartu sebesar mungkin),
+// < 1 = baris lebih pendek supaya kartu pertama bisa pas di tengah.
+let snakePackFrac = 1;
+
+// Terapkan skala kartu ke CSS (--tw) sekaligus ke perhitungan lebar di JS.
+function setSnakeScale(scale) {
+  snakeScale = Math.max(MIN_TILE_SCALE, Math.min(1, scale));
+  const chain = $('boardChain');
+  if (chain) chain.style.setProperty('--tw', `${snakeTileWidth()}px`);
+}
 function snakeAvailWidth(extra) {
   const scroll = $('boardScroll');
-  const avail = (scroll ? scroll.clientWidth : window.innerWidth) - 24 - (extra || 0);
+  const avail = ((scroll ? scroll.clientWidth : window.innerWidth) - 24 - (extra || 0)) * snakePackFrac;
   return Math.max(snakeTileWidth(), avail);
 }
 
@@ -405,7 +424,15 @@ function packSnakeRows(items, avail) {
   return rows;
 }
 
+// true bila paint terakhir menambah ruang scroll papan (min-width / padding
+// rantai) untuk memusatkan kartu pertama — dipakai ResizeObserver di bawah.
+let snakeCenteringExtra = false;
+
 function layoutSnakeChain(chain, items) {
+  // reset bantuan pemusatan kartu pertama dari paint sebelumnya
+  chain.style.minWidth = '';
+  chain.style.paddingTop = '';
+  chain.style.paddingBottom = '';
   let rows = packSnakeRows(items, snakeAvailWidth());
   const paint = () => {
     const gap = snakeGap();
@@ -470,6 +497,247 @@ function layoutSnakeChain(chain, items) {
   }
 }
 
+/* ---- ukuran papan: berapa ruang yang dibutuhkan rantai ----
+   Diukur dari kartu pertama (penanda emas) karena kartu itulah yang harus
+   duduk di tengah: butuh panjang kiri/kanan dan atas/bawah dari titik
+   tengahnya. Semua dalam koordinat layar supaya padding, gutter scrollbar,
+   dan zoom tidak perlu dihitung manual. */
+function boardNeed(chain) {
+  const scroll = $('boardScroll');
+  const card = chain.querySelector('.board-tile.first-card');
+  const rows = [...chain.querySelectorAll('.board-row')];
+  if (!scroll || !card || !rows.length) return null;
+  const cs = getComputedStyle(scroll);
+  const cr = card.getBoundingClientRect();
+  if (!cr.width || !scroll.offsetWidth) return null;
+  const maxH = parseFloat(cs.maxHeight);
+  const availW = scroll.clientWidth - (parseFloat(cs.paddingLeft) || 0) - (parseFloat(cs.paddingRight) || 0);
+  const availH = (isFinite(maxH) ? maxH : scroll.clientHeight) -
+    (parseFloat(cs.paddingTop) || 0) - (parseFloat(cs.paddingBottom) || 0);
+  const cx = cr.left + cr.width / 2, cy = cr.top + cr.height / 2;
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  rows.forEach((r) => {
+    const b = r.getBoundingClientRect();
+    if (b.left < minX) minX = b.left;
+    if (b.right > maxX) maxX = b.right;
+    if (b.top < minY) minY = b.top;
+    if (b.bottom > maxY) maxY = b.bottom;
+  });
+  // padding atas/bawah rantai ikut dihitung: tinggi panel = padding + baris,
+  // dan padding itulah yang dipakai menggeser kartu ke tengah (placeFirstCard).
+  const chainCS = getComputedStyle(chain);
+  const padTop = parseFloat(chainCS.paddingTop) || 0;
+  const padBottom = parseFloat(chainCS.paddingBottom) || 0;
+  const minH = parseFloat(chainCS.minHeight) || 0;
+  return {
+    availW, availH,
+    left: cx - minX, right: maxX - cx,
+    above: cy - minY + padTop, below: maxY - cy + padBottom,
+    width: maxX - minX,
+    height: Math.max(minH, padTop + (maxY - minY) + padBottom),
+  };
+}
+
+// Kartu pertama bisa tepat di tengah hanya kalau sisa ruang kiri/kanan dan
+// atas/bawah dari titik tengah kartu seimbang (dipakai fitBoardScale).
+function boardNeedBalanced(n) {
+  const symX = (2 * Math.max(n.left, n.right)) / n.availW;
+  const symY = (2 * Math.max(n.above, n.below)) / n.availH;
+  return { symX, symY, ok: symX <= 1.02 && symY <= 1.02 };
+}
+
+/* Cari ukuran kartu yang membuat SELURUH rantai muat di papan tanpa perlu
+   di-scroll (tidak ada lagi scroll-scroll mencari susunan kartu), sekaligus
+   mengupayakan kartu pertama tetap di tengah:
+   1) gaya baris PENUH → kartu paling besar; dipakai kalau kartunya sudah
+      cukup dekat ke tengah.
+   2) gaya baris ~60% → baris lebih pendek sehingga sisa ruang kiri-kanan dari
+      titik tengah kartu seimbang (kartu bisa tepat di tengah), dengan
+      konsekuensi kartu sedikit lebih kecil.
+   Kalau isi papan tetap tidak muat di ukuran minimum, papan memakai cara lama
+   (mode scroll) supaya tidak ada kartu yang hilang. */
+function fitBoardScale(chain, paintAt) {
+  // Coba dua gaya pembagian baris: penuh (kartu paling besar) dan lebih pendek
+  // (~60%) yang membuat baris tidak terlalu panjang — baris pendek itulah yang
+  // membuat kartu pertama bisa pas di tengah karena sisa ruang kiri-kanannya
+  // jadi seimbang. Yang menang: isi papan muat, lalu kartu bisa di tengah,
+  // baru ukuran kartu paling besar.
+  const wide = fitAt(chain, paintAt, 1);
+  // Sudah pas (muat + kartu bisa di tengah) → langsung pakai; ini juga yang
+  // membuat render tetap cepat karena tidak perlu coba gaya baris kedua.
+  if (wide.ok && wide.badness <= 1.05) return wide;
+  const narrow = fitAt(chain, paintAt, 0.6);
+  const score = (t) => (t.ok ? (t.centered ? 2 : 1) : 0);
+  // pilih: yang muat dulu, lalu yang kartunya paling dekat ke tengah
+  // (badness = seberapa tidak seimbang), baru ukuran kartu paling besar.
+  return [narrow, wide].sort((a, b) =>
+    (score(b) - score(a)) || (a.badness - b.badness) || (b.scale - a.scale))[0];
+}
+
+// Satu percobaan: cari skala kartu untuk fraksi lebar baris tertentu.
+function fitAt(chain, paintAt, frac) {
+  let scale = 1, need = null;
+  // 1) muat: perkecil sampai seluruh rantai masuk ke papan
+  for (let i = 0; i < 4; i++) {
+    paintAt(scale, frac);
+    need = boardNeed(chain);
+    if (!need) return { scale, frac, ok: true, centered: false, badness: 1 };
+    const over = Math.max(need.width / need.availW, need.height / need.availH);
+    if (over <= 1.005) break;
+    // ukuran konten kira-kira linear terhadap skala → sekali koreksi biasanya cukup
+    const next = Math.max(MIN_TILE_SCALE, scale / over);
+    if (Math.abs(next - scale) < 0.01) break;
+    scale = next;
+  }
+  // 2) seimbang: kecilkan lagi (maks 25%) supaya sisa ruang dari titik tengah
+  //    kartu seimbang kiri/kanan & atas/bawah → kartu bisa tepat di tengah.
+  const limit = Math.max(MIN_TILE_SCALE, scale * 0.75);
+  let bal = boardNeedBalanced(need);
+  for (let i = 0; i < 2 && !bal.ok; i++) {
+    const next = Math.max(limit, scale * Math.min(1, 1 / bal.symX, 1 / bal.symY));
+    if (Math.abs(next - scale) < 0.01) break;
+    scale = next;
+    paintAt(scale, frac);
+    need = boardNeed(chain);
+    if (!need) break;
+    bal = boardNeedBalanced(need);
+  }
+  const over = Math.max(need.width / need.availW, need.height / need.availH);
+  return {
+    scale, frac, ok: over <= 1.005, centered: bal.ok,
+    badness: Math.max(bal.symX, bal.symY),
+  };
+}
+
+/* ---- pusat meja: kartu pertama yang keluar (penanda emas) SELALU duduk di
+   TENGAH area papan yang terlihat — HP, tablet, laptop, apa pun lebarnya.
+   Kalau seluruh isi papan muat (kasus normal setelah kartu diperkecil), isi
+   papan yang digeser — kartu tidak keluar panel, tapi juga tidak ada isi yang
+   terpotong dan papan tidak perlu di-scroll:
+   - horizontal: semua baris digeser (margin-left), dibatasi agar isi tetap di
+     dalam panel → kartu sedekat mungkin ke tengah lebar papan.
+   - vertikal: tinggi panel mengikuti isi, jadi dipakai padding atas/bawah
+     rantai; kalau kartu memang tidak bisa seimbang, padding dibatasi supaya
+     papan tidak jadi bisa di-scroll.
+   Kalau isi masih lebih besar dari papan (skala sudah di batas minimum),
+   dipakai cara lama: kartu tepat di tengah lewat scroll + padding. */
+function placeFirstCard(chain) {
+  const scroll = $('boardScroll');
+  if (!scroll) return;
+  const card = chain.querySelector('.board-tile.first-card');
+  const rows = [...chain.querySelectorAll('.board-row')];
+  snakeCenteringExtra = false;   // penanda untuk ResizeObserver (lihat di bawah)
+  if (!card || !rows.length) return;
+  const need = boardNeed(chain);
+  if (!need) return;
+  if (need.width > need.availW + 1 || need.height > need.availH + 1) {
+    centerFirstCardByScroll(chain, scroll, card, rows);
+    return;
+  }
+
+  // ---- horizontal: geser seluruh baris ----
+  const cs = getComputedStyle(scroll);
+  const sr = scroll.getBoundingClientRect();
+  const cr = card.getBoundingClientRect();
+  const cx = cr.left + cr.width / 2;
+  // tepi kiri area isi panel (gutter scrollbar simetris di kedua sisi)
+  const panelLeft = sr.left + (scroll.offsetWidth - scroll.clientWidth) / 2 + (parseFloat(cs.paddingLeft) || 0);
+  let dx = (sr.left + scroll.offsetWidth / 2) - cx;               // ke titik tengah
+  dx = Math.max(panelLeft - (cx - need.left), Math.min(panelLeft + need.availW - (cx + need.right), dx));
+  if (Math.abs(dx) > 0.5) {
+    rows.forEach((el) => {
+      el.style.marginLeft = `${(parseFloat(el.style.marginLeft) || 0) + dx}px`;
+    });
+  }
+  scroll.scrollLeft = 0;
+
+  // ---- vertikal: padding atas/bawah rantai (panel tumbuh mengikuti isi) ----
+  const chainCS = getComputedStyle(chain);
+  let padTop = parseFloat(chainCS.paddingTop) || 0;
+  let padBottom = parseFloat(chainCS.paddingBottom) || 0;
+  for (let i = 0; i < 4; i++) {
+    const c = card.getBoundingClientRect();
+    const s = scroll.getBoundingClientRect();
+    const delta = (c.top + c.height / 2) - (s.top + scroll.clientHeight / 2);   // >0 → kartu di bawah tengah
+    if (Math.abs(delta) <= 1) break;
+    const prevTop = padTop, prevBottom = padBottom;
+    if (delta > 0) { padBottom += Math.ceil(2 * delta); chain.style.paddingBottom = `${padBottom}px`; }
+    else { padTop += Math.ceil(-2 * delta); chain.style.paddingTop = `${padTop}px`; }
+    scroll.scrollHeight;    // paksa reflow
+    if (scroll.scrollHeight > scroll.clientHeight + 1) {
+      // padding bikin papan jadi bisa di-scroll → batalkan, lebih baik kartu
+      // sedikit tidak di tengah daripada susunan kartu tidak kelihatan semua
+      chain.style.paddingTop = `${prevTop}px`;
+      chain.style.paddingBottom = `${prevBottom}px`;
+      break;
+    }
+  }
+  scroll.scrollTop = 0;
+}
+
+/* ---- cara lama (dipakai kalau isi papan tetap lebih besar dari papan):
+   kartu pertama tepat di tengah lewat scroll + padding, dengan panjang scroll
+   ditambah seperlunya (min-width) supaya posisi tengahnya bisa dicapai. */
+function centerFirstCardByScroll(chain, scroll, card, rows) {
+  const cr = card.getBoundingClientRect();
+  if (!cr.width || !scroll.offsetWidth) return;
+  const sr = scroll.getBoundingClientRect();
+
+  // ---- horizontal ----
+  const C = cr.left + cr.width / 2 + scroll.scrollLeft;   // posisi kartu saat scrollLeft = 0
+  const target = sr.left + scroll.offsetWidth / 2;        // titik tengah meja
+  if (C <= target) {
+    // sisi kiri pendek: geser fisik semua baris ke kanan
+    const mu = target - C;
+    rows.forEach((el) => {
+      el.style.marginLeft = `${(parseFloat(el.style.marginLeft) || 0) + mu}px`;
+    });
+    chain.style.minWidth = '';
+    scroll.scrollLeft = 0;
+  } else {
+    // sisi kanan pendek: capai titik tengah lewat scroll. Kalau area scroll belum
+    // cukup panjang, min-width rantai ditambah — diulang sampai posisinya benar-
+    // benar tercapai (maxScroll nyata beda-beda tergantung scrollbar & gutter,
+    // jadi kekurangannya diukur dari nilai hasil clamp, bukan dihitung manual).
+    const sl = C - target;
+    for (let i = 0; i < 3; i++) {
+      scroll.scrollLeft = sl;
+      const kurang = sl - scroll.scrollLeft;
+      if (kurang <= 1) break;
+      const baseW = chain.getBoundingClientRect().width;   // lebar rantai saat ini
+      chain.style.minWidth = `${Math.ceil(baseW + kurang + 2)}px`;
+      snakeCenteringExtra = true;
+      scroll.scrollWidth;   // paksa reflow: area scroll harus tahu min-width baru
+    }
+  }
+
+  // ---- vertikal ----
+  const cs = getComputedStyle(chain);
+  const baseTop = parseFloat(cs.paddingTop) || 0;
+  const baseBottom = parseFloat(cs.paddingBottom) || 0;
+  let padTop = 0, padBottom = 0;
+  for (let i = 0; i < 3; i++) {
+    const c = card.getBoundingClientRect();
+    const s = scroll.getBoundingClientRect();
+    const delta = (c.top + c.height / 2) - (s.top + scroll.clientHeight / 2);
+    if (Math.abs(delta) <= 1) break;
+    const want = scroll.scrollTop + delta;                // scrollTop yang diinginkan
+    const maxTop = scroll.scrollHeight - scroll.clientHeight;
+    if (want >= 0 && want <= maxTop) { scroll.scrollTop = want; break; }
+    if (want < 0) {
+      // tidak ada ruang di atas kartu → tambah padding atas rantai
+      padTop += Math.ceil(-want) + 1;
+      chain.style.paddingTop = `${baseTop + padTop}px`;
+    } else {
+      // tidak ada ruang di bawah → tambah padding bawah supaya bisa di-scroll
+      padBottom += Math.ceil(want - maxTop) + 1;
+      chain.style.paddingBottom = `${baseBottom + padBottom}px`;
+    }
+    snakeCenteringExtra = true;
+    scroll.scrollHeight;   // paksa reflow sebelum iterasi berikutnya
+  }
+}
+
 // Susun ulang susunan ular saat ukuran layar berubah (rotasi HP, resize).
 let snakeResizeTimer = 0;
 window.addEventListener('resize', () => {
@@ -483,7 +751,11 @@ let snakeLastScrollW = 0;
 if (window.ResizeObserver) {
   new ResizeObserver((entries) => {
     const w = Math.round(entries[0].contentRect.width);
-    if (snakeLastScrollW && Math.abs(w - snakeLastScrollW) > 4) updateBoardDisplay();
+    const d = Math.abs(w - snakeLastScrollW);
+    // Lewati perubahan lebar kecil yang berasal dari scrollbar papan sendiri
+    // (browser yang belum mendukung scrollbar-gutter): kalau ikut diproses,
+    // layout bisa berbalas-balasan (scrollbar muncul → hilang → muncul).
+    if (snakeLastScrollW && d > 4 && !(snakeCenteringExtra && d <= 20)) updateBoardDisplay();
     snakeLastScrollW = w;
   }).observe($('boardScroll'));
 }
@@ -524,6 +796,8 @@ function updateBoardDisplay() {
   const rec = getRecommendation();
 
   if (state.boardTiles.length === 0) {
+    snakePackFrac = 1;
+    setSnakeScale(1);   // papan kosong: kartu siluet tetap seukuran normal
     chain.innerHTML = rec
       ? '<div class="board-empty"><div class="icon">🎲</div>' +
         '<div>Papan kosong — siluet biru di bawah = kartu rekomendasi</div>' +
@@ -585,14 +859,29 @@ function updateBoardDisplay() {
   };
 
   // siluet rekomendasi di sisi yang benar (kiri / kanan)
-  const items = [];
-  if (rec && rec.side === 'left') items.push(ghostItem(rec));
-  state.boardTiles.forEach((bt, i) => items.push(tileItem(bt, i)));
-  if (rec && rec.side !== 'left') items.push(ghostItem(rec));
+  const buildItems = () => {
+    const items = [];
+    if (rec && rec.side === 'left') items.push(ghostItem(rec));
+    state.boardTiles.forEach((bt, i) => items.push(tileItem(bt, i)));
+    if (rec && rec.side !== 'left') items.push(ghostItem(rec));
+    return items;
+  };
+  // Gambar papan pada skala & lebar baris tertentu; `center` = sekalian
+  // memusatkan kartu pertama.
+  const paintAt = (scale, frac, center) => {
+    snakePackFrac = frac;
+    setSnakeScale(scale);
+    layoutSnakeChain(chain, buildItems());
+    if (center) placeFirstCard(chain);
+  };
 
-  layoutSnakeChain(chain, items);
+  // Kartu di papan mengecil otomatis kalau rantai sudah panjang → semuanya
+  // tetap kelihatan tanpa perlu di-scroll mencari susunan kartu.
+  const fit = fitBoardScale(chain, (s, f) => paintAt(s, f, false));
+  paintAt(fit.scale, fit.frac, true);
   status.textContent = `${state.boardTiles.length} kartu di papan`;
-  scrollBoardToRecommendation(chain, rec);
+  // Posisi tampilan papan diatur placeFirstCard (kartu pertama sedekat mungkin
+  // ke tengah), jadi tidak lagi di-scroll ke kartu terbaru/siluet rekomendasi.
 }
 
 /* ---- render: tangan ---- */
