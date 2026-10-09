@@ -1,6 +1,6 @@
 /* Domino Analyzer Pro — service worker (offline shell)
    Strategy: network-first for API, cache-first for static assets. */
-const CACHE = 'domino-analyzer-v3.14';
+const CACHE = 'domino-analyzer-v3.19';
 const CORE = ['/', '/index.html', '/styles.css', '/app.js', '/manifest.json', '/icon.svg'];
 
 self.addEventListener('install', (event) => {

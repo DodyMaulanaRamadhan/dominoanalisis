@@ -49,7 +49,7 @@ header p{color:#8b949e;font-size:0.62rem;margin-top:2px;}
 /* --tw = lebar kartu rebah. app.js mengecilkannya otomatis saat kartu di papan
    sudah banyak (fitBoardScale) supaya seluruh rantai tetap muat; semua ukuran
    lain diturunkan dari --tw agar pips, garis, dan sudut ikut mengecil rapi. */
-.board-chain{--tw:68px;--tb:max(1px,calc(var(--tw) * 0.029));--tp:max(1px,calc(var(--tw) * 0.044));--tr:max(2px,calc(var(--tw) * 0.088));display:flex;flex-direction:column-reverse;align-items:flex-start;width:100%;min-height:80px;gap:2px;padding-top:14px;padding-bottom:16px;}
+.board-chain{--tw:68px;--tb:max(1px,calc(var(--tw) * 0.029));--tp:max(1px,calc(var(--tw) * 0.044));--tr:max(2px,calc(var(--tw) * 0.088));position:relative;display:flex;flex-direction:column-reverse;align-items:flex-start;width:100%;min-height:80px;gap:calc(var(--tw) * 0.15);padding-top:14px;padding-bottom:16px;}
 /* baris rata-BAWAH seperti domino meja: kartu siku tikungan & kartu pertama
    berdiri di atas garis baris, kartu rebah menempel garis bawah — ujung
    sambung antar baris hanya terpisah gap 2px (nyatu). */
@@ -374,6 +374,18 @@ header p{color:#8b949e;font-size:0.62rem;margin-top:2px;}
 /* label absolut: tinggi slot = tinggi kartu saja agar sejajar kartu lain;
    baris bawah label di bawah kartu, baris teratas di ATAS kartu (aman via
    padding-top chain, tak menabrak baris lain). */
+/* siluet rekomendasi (overlay): absolute terhadap .board-chain — tidak menambah
+   slot baris, jadi susunan ular kartu asli tidak bergeser. */
+.rec-overlay{position:absolute;pointer-events:none;}
+/* Slot lebih lebar dari kartu (label nowrap) → kartu ghost dirATA KIRI supaya
+   koordinat penempatan (app.js placeRecGhost) referencing kartu, bukan slot. */
+.rec-overlay .rec-slot{align-items:flex-start;}
+.rec-overlay .rec-slot-tag{pointer-events:auto;}
+/* Ghost berdiri di atas kepala kartu pertama -> label di SAMPING kiri ghost
+   (area kosong di kiri rantai; di atasghost akan keluar panel & terpotong).
+   Yang berdiri di kaki -> label DI BAWAH ghost (area kosong bawah baris). */
+.rec-ov-right .rec-slot-tag{top:50%;bottom:auto;left:auto;right:100%;transform:translateY(-50%);margin:0 6px 0 0;}
+.rec-ov-left .rec-slot-tag{top:100%;bottom:auto;left:50%;transform:translateX(-50%);margin:3px 0 0;}
 .rec-slot-tag{font-size:0.5rem;font-weight:800;color:#58a6ff;background:rgba(88,166,255,0.12);border:1px solid rgba(88,166,255,0.55);border-radius:5px;padding:1px 5px;white-space:nowrap;letter-spacing:0.02em;position:absolute;left:50%;transform:translateX(-50%);top:100%;margin-top:3px;z-index:2;}
 .board-row:last-child .rec-slot-tag{top:auto;bottom:100%;margin-top:0;margin-bottom:3px;}
 .board-tile.ghost{animation:recGlow 1.1s ease-in-out infinite alternate;border-radius:6px;}
@@ -421,7 +433,7 @@ header p{color:#8b949e;font-size:0.62rem;margin-top:2px;}
   .opp-cand-card{width:42px;}
   .opp-cand-card .r-pip,.remaining-card .r-pip{max-width:6px;max-height:6px;}
   /* kartu lebih besar di layar besar; --tw menang atas nilai dasar di atas */
-  .board-chain{--tw:92px;min-height:104px;gap:3px;}
+  .board-chain{--tw:92px;min-height:104px;}
   /* papan lebih tinggi di layar besar: rantai panjang biasanya masih muat
      utuh sehingga kartu pertama (yang dipaku di tengah) tidak perlu di-scroll */
   .board-scroll{max-height:min(62vh,620px);}

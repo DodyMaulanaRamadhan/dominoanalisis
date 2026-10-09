@@ -348,10 +348,11 @@ function makeRecGhostHTML(rec, flip, minWidth) {
   else if (rec.side === 'left') { x = rec.a === le ? rec.b : rec.a; y = le; } // kanan-kiri bertemu
   else { x = re; y = rec.a === re ? rec.b : rec.a; }                    // kiri-kanan bertemu
   if (flip) { const t = x; x = y; y = t; }
-  const vertical = le === -1 && re === -1; // papan kosong: calon kartu pertama
-  const divider = vertical
-    ? '<div class="board-divider-v"></div>'
-    : '<div class="board-divider-h"></div>';
+  // Ghost selalu BERDIRI (vertikal): sisi kanan → separuh cocok di ATAS
+  // (arah jalur ke atas), sisi kiri → separuh cocok di BAWAH (arah ke bawah).
+  // Papan kosong juga berdiri karena dia calon kartu pertama.
+  const vertical = true;
+  const divider = '<div class="board-divider-v"></div>';
   const label = recGhostLabel(rec);
   return `<div class="rec-slot"${minWidth ? ` style="min-width:${minWidth}px"` : ''} role="img" aria-label="Siluet rekomendasi: ${esc(label)}">` +
     `<div class="board-tile ${vertical ? 'vertical' : 'horizontal'} ghost"><div class="board-tile-inner">` +
@@ -392,6 +393,12 @@ function snakeVertWidth() {
 }
 function snakeGap() {
   return window.matchMedia('(min-width:1024px)').matches ? 3 : 2;
+}
+
+// Jarak VERTIKAL antar baris — grew dari lebar kartu (CSS: .board-chain gap
+// memakai calc(var(--tw) * .15)), jadi ikut mengecil bersama kartunya.
+function snakeRowGap() {
+  return Math.max(2, Math.round(snakeTileWidth() * 0.15));
 }
 
 // fraksi lebar papan yang dipakai baris: 1 = penuh (kartu sebesar mungkin),
@@ -738,6 +745,41 @@ function centerFirstCardByScroll(chain, scroll, card, rows) {
   }
 }
 
+/* ---- siluet rekomendasi sebagai overlay diAround kartu pertama ----
+   Kartu pertama berdiri: kepala = bagian atas, kaki = garis dasar baris.
+   - main ke KANAN  -> ghost di atas kepala kartu pertama
+   - main ke KIRI   -> ghost di kaki kartu pertama
+   Ditaruh absolute (position:relative on .board-chain) supaya tidak menambah
+   slot baris — susunan ular kartu asli tetap sama persis. */
+function placeRecGhost(chain, rec, inFlow) {
+  chain.querySelectorAll('.rec-overlay').forEach((el) => el.remove());
+  if (!rec || inFlow) return;
+  const card = chain.querySelector('.board-tile.first-card');
+  if (!card) return;
+  const w = Math.max(snakeVertWidth(), recGhostLabel(rec).length * 5 + 16);
+  const wrap = document.createElement('div');
+  wrap.className = 'rec-overlay ' + (rec.side === 'left' ? 'rec-ov-left' : 'rec-ov-right');
+  wrap.innerHTML = makeRecGhostHTML(rec, false, w);
+  chain.appendChild(wrap);
+  const tile = wrap.querySelector('.board-tile');
+  const gap = snakeRowGap();
+  const cr = card.getBoundingClientRect();
+  const chr = chain.getBoundingClientRect();
+  // Lebar slot lebih besar dari kartu (label nowrap), jadi koordinat diukur dari
+  // kartu ghost-nya sendiri — bukan dari lebar slot.
+  const gw = tile ? tile.getBoundingClientRect().width : snakeVertWidth();
+  // column-reverse: chain dirender dari bawah, jadi sumbu Y dari tepi bawah.
+  if (rec.side === 'left') {
+    // di kaki kartu pertama: berdiri di samping kiri, dasar satu garis dasar
+    wrap.style.left = `${Math.round(cr.left - chr.left - gap - gw)}px`;
+    wrap.style.bottom = `${Math.round(chr.bottom - cr.bottom)}px`;
+  } else {
+    // di atas kepala kartu pertama, separuh cocok menunjuk ke atas
+    wrap.style.left = `${Math.round(cr.left - chr.left)}px`;
+    wrap.style.bottom = `${Math.round(chr.bottom - cr.top + gap)}px`;
+  }
+}
+
 // Susun ulang susunan ular saat ukuran layar berubah (rotasi HP, resize).
 let snakeResizeTimer = 0;
 window.addEventListener('resize', () => {
@@ -849,8 +891,9 @@ function updateBoardDisplay() {
     };
   };
   const ghostItem = (r) => {
-    // label siluet nowrap: 0.5rem bold ≈ 5px/karakter + padding & border
-    const w = Math.max(snakeTileWidth(), recGhostLabel(r).length * 5 + 16);
+    // label siluet nowrap: 0.5rem bold ≈ 5px/karakter + padding & border.
+    // Ghost berdiri → lebarnya separuh kartu rebah (snakeVertWidth).
+    const w = Math.max(snakeVertWidth(), recGhostLabel(r).length * 5 + 16);
     return {
       ghost: true,
       w,
@@ -858,12 +901,14 @@ function updateBoardDisplay() {
     };
   };
 
-  // siluet rekomendasi di sisi yang benar (kiri / kanan)
+  // Siluet rekomendasi TIDAK lagi menjadi bagian flow baris: ia jadi overlay
+  // yang diposisikan relatif ke kartu pertama — di atas kepala kartu pertama
+  // (main ke kanan) atau di kakinya (main ke kiri). Papan kosong tetap flow.
+  const ghostInFlow = !!(rec && rec.side === 'first');
   const buildItems = () => {
     const items = [];
-    if (rec && rec.side === 'left') items.push(ghostItem(rec));
+    if (ghostInFlow) items.push(ghostItem(rec));
     state.boardTiles.forEach((bt, i) => items.push(tileItem(bt, i)));
-    if (rec && rec.side !== 'left') items.push(ghostItem(rec));
     return items;
   };
   // Gambar papan pada skala & lebar baris tertentu; `center` = sekalian
@@ -879,6 +924,9 @@ function updateBoardDisplay() {
   // tetap kelihatan tanpa perlu di-scroll mencari susunan kartu.
   const fit = fitBoardScale(chain, (s, f) => paintAt(s, f, false));
   paintAt(fit.scale, fit.frac, true);
+  // Overlay ghost digambar TERAKHIR: posisinya dibaca dari kotak kartu pertama
+  // yang sudah selesai dipusatkan, dan tidak ikut Altoslayouts/fit di atas.
+  placeRecGhost(chain, rec, ghostInFlow);
   status.textContent = `${state.boardTiles.length} kartu di papan`;
   // Posisi tampilan papan diatur placeFirstCard (kartu pertama sedekat mungkin
   // ke tengah), jadi tidak lagi di-scroll ke kartu terbaru/siluet rekomendasi.
