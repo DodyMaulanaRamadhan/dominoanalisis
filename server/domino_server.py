@@ -156,12 +156,14 @@ def validate_analyze(req: dict) -> str | None:
         return "total kartu melebihi 28"
 
     # numSims = work factor per request — wajib dibatasi (anti-DoS CPU)
+    # Tier akurasi tertinggi (99% ±0,1%) butuh 1.664.100 sim; batas 2 jt.
+    # 166 jt (99% ±0,01%) tidak feasible per-request (berjam-jam) -> ditolak.
     try:
-        nsims = int(req.get("numSims", 1000))
+        nsims = int(req.get("numSims", 10000))
     except (TypeError, ValueError):
-        return "numSims harus angka 1..10000"
-    if not (1 <= nsims <= 10000):
-        return "numSims harus angka 1..10000"
+        return "numSims harus angka 1..2000000"
+    if not (1 <= nsims <= 2000000):
+        return "numSims harus angka 1..2000000"
     req["numSims"] = nsims
 
     hand = req.get("myHand", [])

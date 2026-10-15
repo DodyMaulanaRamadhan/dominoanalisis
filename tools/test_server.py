@@ -113,13 +113,17 @@ class TestValidate(unittest.TestCase):
         self.assertIsNotNone(ds.validate_analyze(bad))
 
     def test_numSims_bounds(self):
-        # anti-DoS: wajib 1..10000; hilang -> default 1000; bukan angka -> tolak
+        # anti-DoS: wajib 1..2000000; hilang -> default 10000; bukan angka -> tolak
         self.assertIsNone(ds.validate_analyze(self.base_ok()))
         lo = self.base_ok(); lo["numSims"] = 1
         self.assertIsNone(ds.validate_analyze(lo))
-        hi = self.base_ok(); hi["numSims"] = 10000
+        hi = self.base_ok(); hi["numSims"] = 2000000
         self.assertIsNone(ds.validate_analyze(hi))
-        for v in (10001, 0, -5, 10**12, "banyak", None):
+        # tier tertinggi 99% ±0,1% (1.664.100) harus VALID; 166 jt ditolak
+        top = self.base_ok(); top["numSims"] = 1664100
+        self.assertIsNone(ds.validate_analyze(top))
+        # hanya nilai luar range yang ditolak
+        for v in (0, -5, 10**12, "banyak", None):
             bad = self.base_ok(); bad["numSims"] = v
             self.assertIsNotNone(ds.validate_analyze(bad),
                                  f"numSims={v!r} harus ditolak")
@@ -177,6 +181,11 @@ class TestServerLive(unittest.TestCase):
             self.assertIn("rankScore", mv)
             self.assertLessEqual(mv["winLo"], mv["winRate"] + 1e-9)
             self.assertGreaterEqual(mv["winHi"], mv["winRate"] - 1e-9)
+            # Regresi: rumus Wilson yang salah membuat interval selalu [0,1]
+            # sehingga lolos pengecekan pengurungan di atas tanpa berguna.
+            # 200 simulasi harus memberi interval yang jelas lebih sempit.
+            self.assertLess(mv["winHi"] - mv["winLo"], 0.3,
+                            f"interval keyakinan tidak wajar: {mv['winLo']}..{mv['winHi']}")
 
     def test_analyze_cangkul_false_and_dead_tiles(self):
         if not ds.ENGINE.exists():
@@ -301,7 +310,9 @@ class TestServerLive(unittest.TestCase):
         self.assertTrue(data["ok"])
 
     def test_numSims_out_of_range_rejected(self):
-        for v in (10001, 10**12, 0):
+        # nilai di dalam range 1..2000000 VALID,
+        # hanya nilai luar range yang ditolak
+        for v in (10**12, 0):
             status, data = http_post(self.port, "/api/analyze",
                                      self.simple_payload(numSims=v))
             self.assertEqual(status, 400, f"numSims={v}")

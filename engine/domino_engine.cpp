@@ -789,14 +789,19 @@ static SimResult simulateGame(const std::vector<int>& myHandIn, int leIn, int re
 // ---------------------------------------------------------------------------
 // Wilson score confidence interval
 // ---------------------------------------------------------------------------
+// Corrected Wilson score interval (was: margin missing the 1/n factor on the
+// p(1-p) term and dividing by denom in the wrong place, which made every
+// interval degenerate to [0,1] for realistic n).
+//   center = (p + z²/2n) / (1 + z²/n)
+//   margin = z * sqrt( p(1-p)/n + z²/4n² ) / (1 + z²/n)
 static std::pair<double, double> wilson(long long w, long long n, double z = 1.96) {
     if (n <= 0) return {0.0, 0.0};
-    double p = static_cast<double>(w) / static_cast<double>(n);
+    double nn = static_cast<double>(n);
+    double p = static_cast<double>(w) / nn;
     double z2 = z * z;
-    double denom = 1.0 + z2 / static_cast<double>(n);
-    double center = (p + z2 / (2.0 * static_cast<double>(n))) / denom;
-    double margin = z * std::sqrt((p * (1.0 - p) + z2 / (4.0 * static_cast<double>(n))) /
-                                  denom);
+    double denom = 1.0 + z2 / nn;
+    double center = (p + z2 / (2.0 * nn)) / denom;
+    double margin = z * std::sqrt(p * (1.0 - p) / nn + z2 / (4.0 * nn * nn)) / denom;
     return {std::max(0.0, center - margin), std::min(1.0, center + margin)};
 }
 
@@ -1007,7 +1012,7 @@ static std::string runAnalyze(const JValue& req) {
     // lalu ke int — cegah DoS CPU walau server lupa memvalidasi.
     double numSimsD = req.at("numSims").asNum(1000);
     if (!(numSimsD >= 1.0)) numSimsD = 1.0;
-    else if (numSimsD > 10000.0) numSimsD = 10000.0;
+    else if (numSimsD > 2000000.0) numSimsD = 2000000.0; // cakup 99% ±0,1% (1.664.100); 166 jt tidak feasible per-request
     int numSims = static_cast<int>(numSimsD);
     unsigned long long seed = static_cast<unsigned long long>(req.at("seed").asNum(42));
     int le = req.at("leftEnd").asInt(-1);
@@ -1703,6 +1708,34 @@ static std::string runSelftest() {
             if (pass && resp.find("moves")->arr.empty()) { pass = false; detail = "moves kosong"; }
         } catch (const std::exception& e) { pass = false; detail = e.what(); }
         checks.push_back({"atribusi_endgame", pass, detail});
+    }
+
+    // 11. interval Wilson: harus mengurung win rate dan menyempit saat jumlah
+    //     simulasi ditambah. Regresi: rumus lama (margin tanpa faktor 1/n pada
+    //     suku p(1-p) dan pembagian denom di posisi salah) membuat setiap
+    //     interval mengecil menjadi [0,1] untuk n yang realistis.
+    {
+        bool pass = true;
+        std::string detail = "w=346/500 -> 0.650..0.731, lebar menyempit saat n naik";
+        auto ci500 = wilson(346, 500);
+        auto ci100 = wilson(69, 100);
+        double p500 = 346.0 / 500.0;
+        double w500 = ci500.second - ci500.first;
+        double w100 = ci100.second - ci100.first;
+        if (!(ci500.first <= p500 && p500 <= ci500.second)) {
+            pass = false;
+            detail = "interval tidak mengurung win rate";
+        } else if (!(std::abs(ci500.first - 0.6502) < 0.006 &&
+                     std::abs(ci500.second - 0.7309) < 0.006)) {
+            pass = false;
+            detail = "nilai CI menyimpang: " + std::to_string(ci500.first) + ".." +
+                     std::to_string(ci500.second);
+        } else if (!(w100 > w500 && w500 < 0.2)) {
+            pass = false;
+            detail = "lebar CI tidak wajar (w100=" + std::to_string(w100) +
+                     ", w500=" + std::to_string(w500) + ")";
+        }
+        checks.push_back({"interval_wilson", pass, detail});
     }
 
     std::ostringstream out;

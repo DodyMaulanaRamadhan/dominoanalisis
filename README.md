@@ -15,7 +15,8 @@ engine/     Mesin C++20 (Monte-Carlo)  ◄── stdin/stdout JSON
 ## Fitur
 
 ### Mesin analisis (v3)
-- **Monte-Carlo adversarial**: setiap kandidat langkah disimulasikan ribuan kali melawan
+- **Monte-Carlo adversarial**: setiap kandidat langkah disimulasikan ribuan hingga
+  1,7 juta kali (tier bawaan 10 rb ≈ 95% ±1%; tertinggi 1,7 jt ≈ 99% ±0,1%) melawan
   lawan AI dengan **3 profil gaya** (Blocker / Hoarder / Dumper) yang dirotasi antar-sim —
   rekomendasi tidak overfit ke satu gaya main.
 - **Mode teliti (adversarial)**: lawan pertama membalas dengan permainan deterministik
@@ -87,13 +88,40 @@ Respons berisi `winLo/winHi` (interval Wilson), `rankScore`, `boneyardCount`,
   sesuai konvensi yang Anda atur di panel setup.
 - **Balak** — umumnya buang cepat, kecuali balaknya angka dominan Anda.
 
+## Dokumentasi
+
+Buku penjelasan sekaligus panduan lengkap ada di `docs/`:
+
+| Berkas | Isi |
+|---|---|
+| `docs/Domino-Analyzer-Pro-Dokumentasi.pdf` | buku lengkap — 10 Bagian, 106 sub-bab bernomor, 9 diagram, daftar isi bertaut |
+| `docs/Domino-Analyzer-Pro-Dokumentasi.md` | sumber buku dalam Markdown |
+| `docs/Domino-Analyzer-Pro-Dokumentasi.docx` | versi yang bisa diedit |
+| `docs/Domino-Analyzer-Pro-Presentasi.pptx` | presentasi ringkas (31 slide, ada catatan pembicara) |
+
+Isi buku ditulis di `docs/src/*.md` dan dibangun ulang dengan:
+
+```bash
+pip install fpdf2 python-docx python-pptx    # hanya untuk membangun dokumen
+python tools/build_docs.py                   # Markdown + PDF + DOCX
+python tools/build_deck.py                   # PPTX
+```
+
+Diagram digambar oleh pembangun PDF, jadi di versi Markdown penandanya masih berupa
+komentar `<!--DIAGRAM:...-->`.
+
+Teks buku memakai **Times New Roman** (cadangan: Liberation Serif, Georgia, DejaVu Serif).
+Gambar latar sampul digambar dengan Pillow saat build dan disimpan di direktori sementara,
+jadi tidak ada aset biner di dalam repo — `python tools/build_docs.py` cukup untuk
+membangun ulang semuanya dari `docs/src/*.md`.
+
 ## Testing
 
 ```bash
-python tools/selftest.py     # 8 invarian engine (deck, parser, determinisme,
+python tools/selftest.py     # 11 invarian engine (deck, parser, determinisme,
                              #   konservasi+constraint deal, simulasi, cangkul,
-                             #   ranking, aturan adu)
-python tools/test_server.py  # 13 unit test server (normalisasi, validasi, e2e)
+                             #   ranking, aturan adu, atribusi, interval Wilson)
+python tools/test_server.py  # 27 unit test server (normalisasi, validasi, e2e, keamanan)
 ```
 
 CI (GitHub Actions) menjalankan keduanya di Linux (g++) dan Windows (MSVC) pada setiap push.
