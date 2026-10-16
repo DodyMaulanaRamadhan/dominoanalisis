@@ -230,11 +230,17 @@ Bagi yang ingin berkontribusi, urutan yang paling berguna untuk diperiksa sebelu
 mengirim perubahan:
 
 1. `python tools/selftest.py` — sebelas pemeriksaan mesin harus lulus;
-2. `python tools/test_server.py` — 27 uji server harus lulus;
-3. `python tools/build_engine.py --force` — pastikan mesin masih bisa dibangun dari nol.
+2. `python tools/test_server.py` — 29 uji server harus lulus;
+3. `python tools/test_engine_parallel.py` — 8 uji paralel/determinisme harus lulus
+   (tambahkan `DOMINO_SLOW_TESTS=1` untuk ikut menguji beban penuh 1,7 juta simulasi);
+4. `python tools/test_ui_heavy.py` — 6 uji antarmuka tanpa kepala untuk tier 1,7 juta harus
+   lulus (perlu `pip install playwright`; dilewati bila tidak ada peramban);
+5. `python tools/build_engine.py --force` — pastikan mesin masih bisa dibangun dari nol.
 
-Perubahan pada tata letak papan atau interaksi antarmuka sebaiknya disertai pemeriksaan
-manual pada lebar ponsel dan desktop, karena bagian itu belum punya uji otomatis.
+Perubahan pada tata letak papan sebaiknya disertai pemeriksaan manual pada lebar ponsel dan
+desktop, karena tata letak belum punya uji otomatis. Perubahan pada alur tier 1,7 juta
+(peringatan, label tombol, pembatalan) sudah punya pengaman otomatis — jalankan
+`tools/test_ui_heavy.py`.
 
 ## Tentang penulis
 

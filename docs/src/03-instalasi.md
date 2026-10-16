@@ -125,11 +125,20 @@ Peringatan yang mungkin muncul:
 | `HOST` | `127.0.0.1` | alamat bind server. Hanya komputer ini yang bisa mengakses bila `127.0.0.1` |
 | `DOMINO_PORT` | `2024` | port server. Nilai `<= 0` dikembalikan ke 2024 |
 | `APP_TOKEN` | *(kosong)* | bila diisi, semua `POST /api/*` wajib menyertakan header `X-App-Token` |
+| `DOMINO_THREADS` | semua inti logis (maks 32) | jumlah thread mesin C++ untuk menjalankan simulasi. `1` = sekuensial. Hasilnya **identik** pada jumlah thread berapa pun |
+| `DOMINO_MAX_ENGINE` | `1` | berapa proses mesin boleh berjalan bersamaan. `1` = permintaan diantrekan supaya tiap analisis memakai seluruh inti CPU |
+| `DOMINO_ENGINE_WAIT` | `60` | batas tunggu (detik) dalam antrean mesin sebelum server menjawab 503 |
 
 Contoh menyalakan di seluruh antarmuka jaringan lokal:
 
 ```bash
 DOMINO_PORT=8080 HOST=0.0.0.0 python server/domino_server.py
+```
+
+Contoh menahan mesin agar memakai 4 thread saja (komputer dipakai kerja lain):
+
+```bash
+DOMINO_THREADS=4 python start.py
 ```
 
 > **Catatan akurasi.** Berkas README proyek menyebut variabel `PORT`, tetapi kode di
@@ -139,7 +148,7 @@ DOMINO_PORT=8080 HOST=0.0.0.0 python server/domino_server.py
 
 > **Peringatan keamanan.** `HOST=0.0.0.0` membuat aplikasi bisa diakses siapa pun di
 > jaringan yang sama, dan setiap permintaan analisis membebani CPU komputer Anda.
-> Endpoint analisis memang dibatasi (maksimum 10.000 simulasi per permintaan), tetapi
+> Endpoint analisis memang dibatasi (maksimum 1.700.000 simulasi per permintaan), tetapi
 > tetap lebih aman membiarkannya di `127.0.0.1` kecuali Anda memang membutuhkan akses
 > dari perangkat lain.
 
@@ -176,7 +185,7 @@ URL itu berlaku selama prosesnya hidup dan berhenti bekerja begitu Anda menutupn
 Yang perlu Anda sadari sebelum melakukan ini:
 
 - **URL itu terbuka untuk siapa saja yang tahu alamatnya.** Tidak ada kata sandi.
-- **Setiap permintaan analisis memakai CPU Anda.** Batas 10.000 simulasi per permintaan
+- **Setiap permintaan analisis memakai CPU Anda.** Batas 1.700.000 simulasi per permintaan
   ada tepat untuk alasan ini, tetapi beberapa pengunjung sekaligus tetap bisa membuat
   komputer Anda sibuk.
 - **Isi sesi permainan bersifat pribadi.** Tidak ada data yang dikirim keluar, tetapi
@@ -232,7 +241,12 @@ domino move analisis/
 ├── tools/
 │   ├── build_engine.py       pencari compiler + pembangun mesin
 │   ├── selftest.py           menjalankan pemeriksaan mandiri mesin
-│   ├── test_server.py        uji unit server (27 tes)
+│   ├── test_server.py        uji unit server (29 tes)
+│   ├── test_engine_parallel.py  uji paralel/determinisme mesin (beban penuh: DOMINO_SLOW_TESTS=1)
+│   ├── test_ui_heavy.py      uji antarmuka tanpa kepala untuk tier 1,7 juta (perlu playwright)
+│   ├── build_baseline.py     bangun mesin dari git HEAD + rekam hasil golden
+│   ├── audit_golden.py       bandingkan keluaran mesin byte-per-byte dengan HEAD
+│   ├── bench_engine.py       ukur kecepatan: HEAD vs 1 thread vs paralel
 │   ├── build_docs.py         pembangun buku dokumentasi ini (Markdown, PDF, DOCX)
 │   └── build_deck.py         pembangun presentasi PPTX
 ├── docs/                     buku dokumentasi (sumber + hasil)
@@ -245,14 +259,17 @@ dari terminal tanpa server sama sekali, seperti yang akan Anda lihat di Bagian V
 
 ## Menguji pemasangan Anda
 
-Tiga perintah yang membuktikan pemasangan berjalan benar:
+Lima perintah yang membuktikan pemasangan berjalan benar:
 
 ```bash
 python tools/selftest.py      # 11 pemeriksaan mandiri mesin
-python tools/test_server.py   # 27 uji unit server (butuh mesin untuk tes end-to-end)
+python tools/test_server.py   # 29 uji unit server (butuh mesin untuk tes end-to-end)
+python tools/test_engine_parallel.py   # 8 uji paralel/determinisme (4 di antaranya beban penuh, perlu DOMINO_SLOW_TESTS=1)
+python tools/test_ui_heavy.py # 6 uji antarmuka tanpa kepala untuk tier 1,7 juta
+                              #   (perlu `pip install playwright`; dilewati bila tak ada peramban)
 python start.py --check       # build + selftest saja, tanpa menjalankan server
 ```
 
-Bila ketiganya keluar dengan kode 0 dan mencetak "OK" atau "semua check LOLOS",
+Bila semuanya keluar dengan kode 0 dan mencetak "OK" atau "semua check LOLOS",
 pemasangan Anda sudah lengkap. Bagian VII menjelaskan apa yang sebenarnya diperiksa
 oleh masing-masing perintah.

@@ -50,7 +50,7 @@ mencatat kartu.
 |---|---|---|---|
 | **Pemain** | 2, 3, 4 | 4 | menentukan jumlah lawan, pembagian kartu, dan urutan giliran |
 | **Kartu/Pemain** | 3 sampai 28 dibagi pemain | maksimum | menentukan jumlah kartu tersembunyi dan kartu sisa |
-| **Simulasi/Kartu** | 500 sampai 1.700.000 | 10000 | seberapa banyak gim yang disimulasikan untuk setiap kandidat langkah; 1 jt ≈ 95% ±0,1%, 1,7 jt ≈ 99% ±0,1% (lambat, bisa dibatalkan) |
+| **Simulasi/Kartu** | 1000, 5000, 10000, 50000, 1.700.000 | 10000 | seberapa banyak gim yang disimulasikan untuk setiap kandidat langkah; 50.000 ≈ 95% ±0,4%; 1.700.000 ≈ 95% ±0,1% (paling akurat, paling lambat — lihat peringatan di bawah) |
 | **Main Setelah Saya** | Lawan 1 sampai Lawan n | Lawan 1 | siapa yang bermain tepat setelah Anda; juga menentukan lawan mana yang bersikap ketat di mode teliti |
 | **Adu: Banding** | Mata terkecil / Rata-rata | Mata terkecil | cara menentukan pemenang saat meja macet |
 | **Seri = ?** | Menang / Kalah | Menang | perilaku bila nilai mata Anda sama dengan pembanding |
@@ -73,15 +73,50 @@ statistiknya, bukan dari tebakan:
 
 | Simulasi | Waktu tunggu (perkiraan) | Kapan dipakai |
 |---|---|---|
-| 500 | paling cepat | saat bermain cepat atau di ponsel lama |
-| 1000 | cepat | pemakaian sehari-hari |
-| 2000 (bawaan) | sedang | keseimbangan yang baik |
-| 5000 | paling lama | keputusan besar, atau saat Anda ingin membaca selisih tipis |
+| 1000 | paling cepat | saat bermain cepat atau di ponsel lama |
+| 5000 | cepat | pemakaian sehari-hari |
+| 10000 (bawaan) | sedang | keseimbangan yang baik |
+| 50000 | hitungan detik | keputusan besar, atau saat Anda ingin membaca selisih tipis |
+| 1.700.000 | puluhan detik (peringatan aktif) | keputusan paling penting; interval keyakinan menyempit sampai ±0,1% sehingga selisih kecil antar langkah benar-benar bisa dipercaya |
 
 Semakin banyak simulasi, semakin sempit interval keyakinan, sehingga perbedaan kecil
-antar langkah bisa Anda percayai. Sebaliknya, pada 500 simulasi, selisih dua persen tidak
+antar langkah bisa Anda percayai. Sebaliknya, pada 1000 simulasi, selisih dua persen tidak
 berarti apa-apa. Bab tentang interval keyakinan di Bagian V menjelaskan hal ini dengan
 angka.
+
+### Tier 1.700.000 simulasi: peringatan dan aturan mainnya
+
+Tier tertinggi memberi interval paling sempit (≈95% ±0,1%), tetapi satu analisis memakai
+**seluruh inti CPU selama puluhan detik**. Empat hal berikut menjaganya tetap nyaman:
+
+| Perilaku | Penjelasan |
+|---|---|
+| **Konfirmasi sebelum dipakai** | saat Anda memilih 1.700.000, aplikasi menampilkan peringatan berisi perkiraan waktunya. Menolak akan mengembalikan pilihan sebelumnya |
+| **Peringatan tetap terlihat** | selama tier ini aktif, banner kuning di bawah panel Setup menyebutkan perkiraan waktu untuk posisi Anda saat ini (dihitung dari jumlah kandidat langkah × jumlah simulasi × jumlah inti komputer) |
+| **Mode Live dimatikan** | analisis **tidak** dijalankan otomatis setiap kali Anda menempatkan kartu. Tanpa aturan ini, setiap langkah memicu 1,7 juta simulasi baru dan CPU tidak pernah berhenti |
+| **Tombol Batal benar-benar menghentikan** | menekan Batal saat analisis berjalan tidak hanya membatalkan tampilan hasil — server menghentikan proses mesinnya, sehingga CPU langsung bebas |
+| **Label tombol tidak menipu** | teks tombol selalu mengikuti tier yang sedang dipilih: memilih tier berat mengubahnya menjadi "Analisis 1,7 jt (sekali)", dan menurunkannya kembali mengembalikannya ke "Analisis Live" |
+| **Live dihidupkan lagi hanya kalau tadi ia yang mematikannya** | menurunkan tier dari 1,7 juta menyalakan Live kembali otomatis; tetapi bila Anda sendiri yang menjeda Live, ia tetap jeda — aplikasi tidak mengambil alih keputusan Anda |
+| **Sesi yang diimpor ikut diperingatkan** | memuat sesi lama yang tersimpan pada tier 1,7 juta langsung menampilkan banner peringatan dan label sekali-jalan, bukan diam-diam masuk tier berat |
+
+Selama analisis berjalan, bilah kemajuan menampilkan waktu berjalan dan perkiraan sisa.
+Perkiraannya kasar dan sengaja tidak pernah menunjukkan "hampir selesai" sebelum benar-
+benar selesai.
+
+Waktu nyata di mesin uji (6 inti fisik / 12 utas logis; 4 pemain, cangkul aktif):
+
+| Situasi | Kandidat langkah | Waktu |
+|---|---|---|
+| Pertengahan permainan | 3 | ≈7,5 detik |
+| Papan terbuka, banyak pilihan | 12 | ≈30 detik |
+| Mode teliti | 3 | ≈7,6 detik |
+| Papan kosong, seluruh 7 kartu bisa dibuka | 7 | 22 detik (terukur) |
+
+Tier ini tetap jauh di bawah batas waktu server (300 detik), jadi hasilnya tidak pernah
+dipotong di tengah jalan. Yang tidak kalah penting: selagi mesin memakai seluruh 12 utas,
+antarmuka tetap lancar — diukur 59 frame/detik dan interaksi selesai dalam 18 ms — dan
+proses mesinnya benar-benar dimatikan dalam ~0,4 detik setelah Anda menekan Batal
+(diukur ulang oleh uji antarmuka otomatis, lihat Bagian VII).
 
 ## Bilah aksi
 

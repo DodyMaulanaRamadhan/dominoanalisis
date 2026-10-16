@@ -245,6 +245,19 @@ sisa, serta perkiraan jumlah kartu mati per angka. Jumlah simulasi tambahan ini 
 Server sengaja tipis: ia menormalkan, memvalidasi, memanggil mesin, dan menyajikan berkas.
 Dua hal yang membuatnya tidak sekadar "pipa":
 
+**Pembatalan yang benar-benar membatalkan.** Peramban yang menekan tombol Batal menutup
+koneksinya, dan server memantau hal itu setiap 0,2 detik (`select` + `MSG_PEEK`). Begitu
+koneksi hilang, proses mesin dimatikan — penting pada tier 1,7 juta simulasi, karena tanpa
+ini CPU tetap bekerja penuh (dan antrean ikut terhambat) hanya untuk hasil yang tidak akan
+pernah ditampilkan.
+
+**Antrean mesin.** Satu proses mesin memakai seluruh inti CPU (`DOMINO_THREADS`). Bila
+beberapa permintaan datang bersamaan tanpa pengaturan, mereka saling merebut inti yang
+sama sehingga setiap analisis menjadi lebih lambat dan waktu tunggunya tak terduga.
+Karena itu server menjalankan mesin bergiliran (bawaan `DOMINO_MAX_ENGINE=1`), dengan
+antrean berbatas `DOMINO_ENGINE_WAIT` detik sebelum menjawab 503. Satu permintaan pada
+satu waktu berarti setiap analisis mendapat kecepatan penuh.
+
 **Kode status HTTP yang jujur.** Kesalahan tidak pernah menyamar sebagai keberhasilan.
 
 | Keadaan | Status | Alasan |
@@ -258,6 +271,7 @@ Dua hal yang membuatnya tidak sekadar "pipa":
 | mesin gagal dijalankan (exit != 0) | 500 | detail hanya masuk log server |
 | balasan mesin bukan JSON | 502 | mesin berjalan tetapi keluarannya rusak |
 | biner mesin belum ada | 503 | pemasangan belum lengkap |
+| antrean mesin penuh (menunggu > `DOMINO_ENGINE_WAIT`) | 503 | semua slot mesin sibuk |
 | mesin melebihi 300 detik | 504 | permintaan terlalu berat |
 
 Prinsip desainnya: klien luar (skrip, monitor, `curl`) harus bisa menyimpulkan berhasil

@@ -53,7 +53,7 @@ jumlah fallback dilaporkan sebagai informasi. Prinsipnya: bila batasan yang Anda
 secara matematis mustahil dipenuhi (misalnya kuota kartu lebih besar daripada kartu yang
 tersedia setelah eliminasi), mesin harus tetap berjalan dan tetap jujur tentang itu.
 
-## Dua puluh tujuh uji server
+## Dua puluh sembilan uji server
 
 ```bash
 python tools/test_server.py
@@ -66,11 +66,19 @@ Suite ini menjalankan server sungguhan pada port sementara dan menguji tiga kelo
 `1-2-3`, angka bukan string), dan satu tes khusus yang memastikan **pesan galat tidak
 pernah memantulkan masukan mentah** — termasuk ketika masukan itu berisi skrip HTML.
 
-**Validasi permintaan (6 tes).** Permintaan yang sah diterima; `nextSeat` di luar batas
+**Validasi permintaan (8 tes).** Permintaan yang sah diterima; `nextSeat` di luar batas
 ditolak; aturan adu dan aturan seri yang tidak dikenal ditolak; panjang `playedBy` dan
 label pemain diperiksa; kartu yang muncul di tangan dan papan sekaligus ditolak; serta
-batas `numSims` (1 sampai 2000000, nilai aneh seperti `10^12`, bilangan negatif, teks, dan
+batas `numSims` (1 sampai 1700000, nilai aneh seperti `10^12`, bilangan negatif, teks, dan
 nilai kosong semuanya ditolak) — pengaman anti pembebanan CPU.
+
+Dua tes terakhir kelompok ini menguji **pembatalan**, karena pada tier 1.700.000 tombol
+Batal bukan sekadar kenyamanan: tanpa itu seluruh inti CPU tetap terpakai puluhan detik.
+
+| Tes | Yang dibuktikan |
+|---|---|
+| `client_gone_detects_disconnect` | `client_gone` benar-benar membedakan koneksi yang masih hidup dari yang sudah ditutup klien, dan tidak memakan data yang masih antre |
+| `run_engine_cancel_kills_process` | proses mesin yang sedang menghitung 400.000 simulasi berhenti < 5 detik setelah pembatalan diminta, dan tidak menghasilkan JSON utuh |
 
 **Uji langsung terhadap server (17 tes).** Endpoint kesehatan, `/api/meta` yang
 menormalkan masukan dan hanya mengembalikan kartu yang benar-benar ada, analisis
@@ -97,27 +105,172 @@ supaya cacat itu tidak bisa kembali tanpa ketahuan.
 Hasil menjalankan suite di mesin ini:
 
 ```text
-Ran 27 tests in 0.781s
+Ran 29 tests in 1.093s
 OK
 ```
 
+## Paralelisasi: output harus tidak berubah (4 tes)
+
+Mesin menjalankan simulasi Monte-Carlo dengan beberapa thread sekaligus
+(`DOMINO_THREADS`, bawaan semua inti logis). Satu hal yang tidak boleh terjadi adalah
+jumlah thread mengubah hasil: pembagian blok kerja memakai snapshot stream bilangan
+acak yang sama, sehingga urutan undian tiap simulasi tetap identik.
+
+Jalankan `python tools/test_engine_parallel.py`:
+
+| Tes | Yang dibuktikan |
+|---|---|
+| `parallel_equals_sequential` | output 1 thread **sama persis** dengan 2 dan 8 thread pada empat skenario (4 pemain, adversarial, 2 pemain, batas 2000 sim) |
+| `default_threads_matches_sequential` | mode bawaan (semua inti) sama dengan mode sekuensial |
+| `threads_zero_or_negative_means_sequential` | `DOMINO_THREADS=0` dan angka negatif tidak membuat mesin gagal, dan tetap sekuensial |
+| `empty_unknown_pool_does_not_crash` | permintaan dengan pool kartu tak diketahui **kosong** (2 pemain x 14 kartu) tidak lagi mematikan proses |
+
+Ditambah suite beban penuh (dijalankan dengan `DOMINO_SLOW_TESTS=1`, ≈1 menit) untuk tier
+1.700.000 simulasi — beban maksimum yang ditawarkan aplikasi:
+
+| Tes | Yang dibuktikan |
+|---|---|
+| `test_no_crash_and_ok` | mesin tidak jatuh dan tidak memangkas `numSims` pada beban penuh |
+| `test_counts_and_conservation_at_full_load` | `wins + losses == numSims`, rincian kemenangan konsisten, konservasi kartu terjaga, dan lebar interval < 0,2 poin (janji ±0,1%) |
+| `test_rankScore_sorted` | urutan peringkat tetap benar pada beban penuh |
+| `test_full_load_parallel_equals_sequential` | output 1 thread, 4 thread, dan 12 thread **sama persis** pada 1,7 juta simulasi |
+
+Hanya dua jalur pembatalan yang diuji di suite ini (level soket): pembatalan yang benar
+saat pengguna menekan Batal juga sudah diverifikasi dari sisi antarmuka (lihat akhir bab
+ini). Bukti nyata dari jalur browser: log server mencatat `[engine] dibatalkan: klien
+menutup koneksi`, dan tidak ada satu pun proses `domino_engine` yang tertinggal.
+
+Dua tes terakhir adalah pengaman regresi untuk cacat nyata: `shuffle` pada vector kosong
+dulu memakai indeks `SIZE_MAX` lalu `nextInt(0)` (modulo nol) — proses mati dengan
+`0xC0000094`/`0xC0000005`.
+
+## Verifikasi identik terhadap build sebelumnya
+
+Perubahan pada jalur perhitungan tidak boleh dinilai hanya dari "masih jalan".
+`tools/audit_golden.py` membandingkan keluaran mesin **byte-per-byte**:
+
+```bash
+python tools/build_baseline.py                       # bangun mesin dari git HEAD + rekam golden
+python tools/audit_golden.py verify "$TEMP/domino_audit_head"
+```
+
+Sembilan skenario diuji: 2/3/4 pemain, mode adversarial, cangkul mati, kartu pertama,
+atribusi `playedBy`, 5000 simulasi (jalur paralel), batas 2000 simulasi, dan pool kartu
+kosong. Semuanya harus melaporkan `IDENTIK`. Skrip mencatat juga bila mesin lama
+**crash** pada suatu skenario, lalu memeriksa bahwa crash itu sudah hilang.
+
+## Mengukur kecepatan
+
+```bash
+python tools/bench_engine.py     # mesin HEAD vs optimasi 1 thread vs optimasi paralel
+```
+
+Contoh keluaran di mesin uji pada beban 50.000 simulasi x jumlah kandidat langkah
+(AMD Ryzen 5 5625U — **6 inti fisik / 12 utas logis**; "12 thread" di bawah berarti 12 utas):
+
+| Versi | Waktu | Laju | Relatif |
+|---|---|---|---|
+| build HEAD | 2,62 s | 57.344 sim/detik | 1,00x |
+| optimasi 1 thread | 1,03 s | 146.042 sim/detik | 2,55x |
+| optimasi paralel (12 thread) | 0,20 s | 770.762 sim/detik | 13,44x |
+
+### Beban penuh (tier 1.700.000) yang terukur
+
+Tier tertinggi bukan sekadar angka di dokumen; ia diukur, dan invariannya diperiksa pada
+skala itu. Semua angka di bawah berasal dari mesin uji di atas, 4 pemain, cangkul aktif,
+7 kandidat langkah (papan kosong, 7 kartu di tangan):
+
+| Yang diukur | Hasil | Arti |
+|---|---|---|
+| Waktu satu analisis penuh | **22,0 s** (11,9 juta simulasi-langkah) | jauh di bawah batas 300 detik, jadi tidak ada hasil yang terpotong |
+| Laju | **602.081 simulasi-langkah/detik** (12 utas) | "1,7 juta simulasi" per kartu selesai dalam ~3 detik |
+| Efisiensi paralel | **5,23x** pada 12 utas = **87,2%** dari 6 inti fisik (6 utas memberi 3,79x) | sisa ~13% adalah bagian yang memang sekuensial (perakitan hasil, simulasi sisa kartu) |
+| Hasil 1 vs 6 vs 12 utas | **identik byte-per-byte** | jumlah utas tidak pernah mengubah angka |
+| Dua run beban penuh | **identik byte-per-byte** | deterministik sampai skala maksimum |
+| Setengah-lebar interval terlebar | **0,0752 poin** (janji: ≤ 0,1) | klaim ±0,1% pada tier ini terbukti, bukan perkiraan |
+| Konservasi | `wins + losses == 1.700.000` dan `conserved: true` pada semua 7 langkah | tidak ada kartu atau gim yang hilang karena bebannya besar |
+
+Beban besar juga diuji dari sisi yang paling mudah dilupakan: **apakah aplikasinya masih
+enak dipakai selagi mesin bekerja?** Selama run 22 detik yang memakai seluruh 12 utas,
+antarmuka diukur langsung: **59 frame/detik** (frame terburuk 30 ms) dan satu interaksi
+nyata (mengganti jumlah pemain, termasuk menggambar ulang) selesai dalam **18 ms**.
+Server tetap melayani endpoint ringan seperti `/api/meta` tanpa masuk ke antrean mesin,
+karena endpoint itu memang tidak memanggil mesin. Yang berat tetap dibatasi: `numSims`
+ditangani berurutan (`DOMINO_MAX_ENGINE`, bawaan 1) dan permintaan yang menunggu lebih dari
+60 detik dijawab 503, bukan menggantung selamanya.
+
+Terakhir, jalur yang benar-benar dipakai pengguna: memilih tier 1.700.000 memunculkan
+peringatan (dan peringatan itu muncul kembali setiap kali pengguna menaikkan tier dari yang
+lebih ringan), analisis berjalan dengan indikator waktu, tombol Batal mematikan proses
+dalam ~0,4 detik, dan hasilnya tampil: **7 langkah, interval ±0,03 poin, selesai 15,4 detik**
+dari perkiraan yang ditampilkan (~19 detik) — perkiraan yang sengaja dibuat sedikit
+pesimistis.
+
+## Uji antarmuka tanpa kepala (6 tes)
+
+Peramban sungguhan tapi tanpa jendela (Playwright) menjalankan aplikasi yang utuh — server
+Python, `web/`, dan mesin C++ — supaya perilaku yang hidup di JavaScript tidak lagi hanya
+diuji manual:
+
+```bash
+pip install playwright
+python tools/test_ui_heavy.py
+```
+
+Paket `playwright` memakai peramban yang sudah terpasang di komputer (Edge/Chrome), jadi
+tidak perlu mengunduh Chromium; bila tidak ada peramban sama sekali, uji ini **dilewati**
+(skip), bukan gagal. Di CI, Chromium dipasang eksplisit pada pekerjaan `ui-headless`.
+
+| Tes | Yang dibuktikan |
+|---|---|
+| `test_heavy_option_exists_and_warns_before_use` | opsi 1.700.000 ada; memilihnya memunculkan dialog berisi jumlah simulasi, perkiraan waktu, dan cara membatalkan; banner serta label sekali-jalan menyala; mode Live padam |
+| `test_declining_warning_reverts_to_previous_tier` | menolak dialog mengembalikan tier sebelumnya tanpa mengubah mode Live; menyetujui dialog tetap membuka tier berat |
+| `test_button_label_always_matches_tier` | label tombol selalu cocok dengan tier pada kenaikan/penurunan berturut-turut, dan peringatan muncul lagi di setiap kenaikan |
+| `test_manual_pause_survives_tier_change` | jeda Live yang dilakukan pengguna sendiri tidak dinyalakan kembali saat tier diturunkan |
+| `test_heavy_tier_still_warned_after_reload` | sesi tersimpan pada tier berat tetap menampilkan banner setelah halaman dimuat ulang, tanpa dialog yang menghadang |
+| `test_cancel_button_stops_engine_process` | menekan Batal: proses `domino_engine` benar-benar hilang (**~0,4 detik** pada mesin uji), server mencatat `[engine] dibatalkan`, label pulih ke mode sekali-jalan, dan tidak ada hasil yang tampil |
+
+Tes terakhir berjalan dari posisi dengan 5 kandidat langkah (≈10–20 detik pada 1,7 juta
+simulasi) dan memeriksa bahwa analisis **masih berjalan** tepat sebelum Batal ditekan.
+Tanpa pemeriksaan itu, uji hanya akan membuktikan analisis yang kebetulan sudah selesai.
+Dengan uji ini, jalur soket yang sesungguhnya (klien menutup koneksi → server mematikan
+mesin) ikut terjaga, bukan hanya fungsi internalnya lewat uji unit.
+
+### Uji ini bergigi — dan itu diperiksa
+
+Uji yang selalu hijau tidak membuktikan apa pun, jadi tiap klaim utama diuji dengan
+**mutasi**: satu aturan dicabut dari kode, dan uji harus gagal dengan gejala yang tepat.
+
+| Mutasi (cacat yang disuntikkan) | Gejala yang tertangkap |
+|---|---|
+| label tidak lagi mengikuti tier | `label harus menandai analisis sekali-jalan, dapat: '▶️ Analisis Live'` |
+| penolakan dialog tidak mengembalikan tier | `'1700000' != '50000'` |
+| tier berat tidak lagi mematikan Live | `label harus menandai analisis sekali-jalan, dapat: '⏸ Jeda Live'` |
+| server mengabaikan koneksi yang ditutup klien | `proses mesin masih hidup > 8 detik setelah Batal` |
+
+Setelah kode dipulihkan, keenam uji kembali lulus.
+
 ## Integrasi berkelanjutan (CI)
 
-Setiap kali perubahan dikirim ke cabang `main`, tiga pekerjaan berjalan di GitHub Actions:
+Setiap kali perubahan dikirim ke cabang `main`, empat pekerjaan berjalan di GitHub Actions:
 
 | Pekerjaan | Sistem | Yang dijalankan |
 |---|---|---|
 | `engine-linux` | Ubuntu, g++ | bangun mesin, selftest, uji server |
 | `engine-windows` | Windows, MSVC | bangun mesin, selftest, uji server |
 | `server-linux` | Ubuntu, tanpa mesin | uji server saja (tes yang butuh mesin dilewati dengan rapi) |
+| `ui-headless` | Ubuntu + Chromium | uji antarmuka tanpa kepala untuk tier 1,7 juta |
 
-Tiga pekerjaan ini menjawab tiga pertanyaan berbeda:
+Empat pekerjaan ini menjawab empat pertanyaan berbeda:
 
 1. **Apakah mesin masih bisa dibangun oleh dua kompiler berbeda?** Ini menangkap
    penggunaan fitur bahasa yang tidak portabel.
 2. **Apakah invarian mesin masih berlaku?** Ini yang menjalankan sebelas pemeriksaan.
 3. **Apakah server tetap benar tanpa mesin?** Ini memastikan validasi, normalisasi, dan
    kontrak status HTTP tidak bergantung pada biner yang ada.
+4. **Apakah alur tier berat tetap benar dari sisi pengguna?** Ini menjalankan peramban
+   sungguhan yang menekan tombol-tombolnya: peringatan, penolakan, label, dan Batal yang
+   mematikan proses mesin.
 
 Perhatikan pekerjaan ketiga: uji server dirancang agar tes yang membutuhkan mesin
 **dilewati secara sadar** (`skipTest`) bila biner belum dibangun, bukan gagal. Prinsipnya
@@ -188,8 +341,9 @@ Kejujuran tentang cakupan sama pentingnya dengan hasil tesnya sendiri.
   pemusatan kartu pertama, dan posisi siluet rekomendasi diverifikasi secara manual di
   peramban (termasuk pada lebar ponsel 390 piksel). Perubahan CSS atau JavaScript pada
   bagian itu tidak akan tertangkap oleh tes.
-- **Interaksi pengguna belum diuji otomatis.** Modal, masukan cepat, dan alur Undo diuji
-  manual.
+- **Sebagian interaksi pengguna kini dijaga otomatis, sebagian belum.** Alur tier
+  1,7 juta (peringatan, penolakan, label, Batal yang mematikan mesin) dijaga uji peramban
+  tanpa kepala; modal, masukan cepat, dan alur Undo masih diuji manual.
 - **Belum ada tolok ukur kinerja di CI.** Waktu tunggu analisis bergantung pada perangkat;
   angka waktu di Bagian IV adalah perkiraan, bukan hasil pengukuran otomatis.
 - **Akurasi heuristik tidak diverifikasi terhadap permainan manusia.** Mesin memverifikasi
@@ -199,5 +353,5 @@ Kejujuran tentang cakupan sama pentingnya dengan hasil tesnya sendiri.
   tetapi cakupan skenarionya tetap terbatas pada skenario yang ditulis di kode.
 
 Bila Anda ingin menambah pengujian, sasaran yang paling berharga saat ini adalah uji
-otomatis untuk tata letak papan (misalnya dengan peramban tanpa kepala) dan uji
-interaksi dasar untuk alur kartu → PASS → atribusi → Undo.
+otomatis untuk tata letak papan dan uji interaksi dasar untuk alur kartu → PASS → atribusi
+→ Undo (fondasi peramban tanpa kepala untuk itu sudah ada di `tools/test_ui_heavy.py`).

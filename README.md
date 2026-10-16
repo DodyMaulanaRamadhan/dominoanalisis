@@ -15,8 +15,9 @@ engine/     Mesin C++20 (Monte-Carlo)  ◄── stdin/stdout JSON
 ## Fitur
 
 ### Mesin analisis (v3)
-- **Monte-Carlo adversarial**: setiap kandidat langkah disimulasikan ribuan hingga
-  1,7 juta kali (tier bawaan 10 rb ≈ 95% ±1%; tertinggi 1,7 jt ≈ 99% ±0,1%) melawan
+- **Monte-Carlo adversarial**: setiap kandidat langkah disimulasikan 1.000 hingga
+  1.700.000 kali (tier bawaan 10 rb ≈ 95% ±1%; tertinggi 1,7 jt ≈ 95% ±0,1% dengan
+  peringatan waktu — lihat bawah) melawan
   lawan AI dengan **3 profil gaya** (Blocker / Hoarder / Dumper) yang dirotasi antar-sim —
   rekomendasi tidak overfit ke satu gaya main.
 - **Mode teliti (adversarial)**: lawan pertama membalas dengan permainan deterministik
@@ -26,8 +27,15 @@ engine/     Mesin C++20 (Monte-Carlo)  ◄── stdin/stdout JSON
 - **Konvensi meja yang bisa diatur**: aturan adu (mata terkecil vs rata-rata) dan
   aturan seri (menang vs kalah).
 - **Confidence interval Wilson 95%** di setiap win rate → perbedaan tipis tidak menyesatkan.
-- **Ranking satu sumber kebenaran** (`rankScore`) dihitung di engine, bukan di UI.
-- **Deterministik**: seed tetap → hasil identik (RNG xoshiro256**).
+- **Multi-inti**: simulasi dibagi ke beberapa thread (`DOMINO_THREADS`, bawaan semua
+  utas logis) dengan hasil **byte-per-byte identik** dengan mode 1 thread — ≈12–13x lebih
+  cepat pada mesin uji (6 inti fisik / 12 utas logis, 87% dari ideal) tanpa satu angka pun
+  berubah.
+- **Tier 1.700.000 simulasi** (opsional, dengan peringatan): interval keyakinan sampai
+  ±0,075 poin, 22 detik untuk 7 kandidat langkah di mesin uji, dan antarmuka tetap lancar
+  karena analisis berjalan di latar belakang serta bisa dibatalkan.
+- **Deterministik**: seed tetap → hasil identik (RNG xoshiro256**), termasuk pada
+  jumlah thread berapa pun.
 
 ### Tracking lawan
 - **PASS lawan** → eliminasi angka ujung dari kemungkinan kartu mereka.
@@ -41,7 +49,12 @@ engine/     Mesin C++20 (Monte-Carlo)  ◄── stdin/stdout JSON
 - Autosave ke localStorage + **Export/Import sesi** (JSON).
 - **Undo timeline** konsisten — kartu, atribusi, dan PASS lawan ikut ter-undo.
 - Banner menang saat tangan habis; panduan PASS saat tidak ada langkah valid.
-- Analisis bisa **dibatalkan**; pesan error ramah (format kartu dinormalisasi otomatis:
+- **Peringatan tier berat**: memilih 1.700.000 simulasi memunculkan konfirmasi berisi
+  perkiraan waktu, mematikan mode Live (analisis hanya saat tombol ditekan), dan
+  menampilkan sisa waktu yang terus berjalan.
+- Analisis bisa **dibatalkan** — dan pembatalannya nyata: server menghentikan proses mesin,
+  jadi CPU langsung bebas, bukan menyelesaikan analisis yang hasilnya tak dipakai.
+  Pesan error ramah (format kartu dinormalisasi otomatis:
   `6-1`, `6|1`, `6:1`, `61` → semua diterima).
 - **PWA** (installable, offline shell) + label aksesibilitas pada semua kartu.
 
@@ -118,10 +131,26 @@ membangun ulang semuanya dari `docs/src/*.md`.
 ## Testing
 
 ```bash
-python tools/selftest.py     # 11 invarian engine (deck, parser, determinisme,
-                             #   konservasi+constraint deal, simulasi, cangkul,
-                             #   ranking, aturan adu, atribusi, interval Wilson)
-python tools/test_server.py  # 27 unit test server (normalisasi, validasi, e2e, keamanan)
+python tools/selftest.py                # 11 invarian engine (deck, parser, determinisme,
+                                        #   konservasi+constraint deal, simulasi, cangkul,
+                                        #   ranking, aturan adu, atribusi, interval Wilson)
+python tools/test_engine_parallel.py    # 4 tes: output paralel == sekuensial, anti-crash
+DOMINO_SLOW_TESTS=1 python tools/test_engine_parallel.py   # + suite beban 1,7 juta (~1 menit)
+python tools/test_server.py             # 29 unit test server (normalisasi,
+                                        #   validasi, e2e, keamanan)
+pip install playwright                  # sekali saja, untuk uji antarmuka
+python tools/test_ui_heavy.py           # 6 uji antarmuka tanpa kepala untuk tier
+                                        #   1,7 juta (peringatan, label, Batal)
 ```
 
-CI (GitHub Actions) menjalankan keduanya di Linux (g++) dan Windows (MSVC) pada setiap push.
+Alat audit (dipakai saat mengubah jalur perhitungan):
+
+```bash
+python tools/build_baseline.py               # bangun mesin dari git HEAD + rekam golden
+python tools/audit_golden.py verify "$TEMP/domino_audit_head"   # 9 skenario harus IDENTIK
+python tools/bench_engine.py                 # HEAD vs 1 thread vs paralel (sim/detik)
+```
+
+CI (GitHub Actions) menjalankan semuanya di Linux (g++) dan Windows (MSVC) pada setiap push,
+ditambah satu pekerjaan khusus uji antarmuka tanpa kepala (peramban Chromium) untuk tier
+1.700.000 simulasi.

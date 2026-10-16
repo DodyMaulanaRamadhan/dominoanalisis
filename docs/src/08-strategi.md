@@ -153,7 +153,7 @@ langkah ini setiap giliran; total waktunya di bawah sepuluh detik setelah terbia
 | Menandai PASS "untuk berjaga-jaga" | simulasi menghormati bukti palsu; rekomendasi menyimpang | tandai PASS hanya bila benar-benar terlihat |
 | Lupa mencatat kartu lawan | profil lawan menyesatkan, kemungkinan kartu tidak menyempit | catat setiap kartu lawan yang bisa Anda atribusikan |
 | Salah jumlah kartu per pemain | jumlah kartu tersembunyi dan sisa tidak sinkron | cek baris keterangan di panel Setup |
-| Memakai 500 simulasi lalu memercayai selisih 2% | derau statistik dianggap sinyal | naikkan ke 2000, atau lihat interval keyakinan |
+| Memakai 1000 simulasi lalu memercayai selisih 2% | derau statistik dianggap sinyal | naikkan ke 10.000, atau lihat interval keyakinan |
 | Mengubah pengaturan meja di tengah permainan | hasil sebelum dan sesudah tidak bisa dibandingkan | setel aturan sebelum mencatat |
 | Mengabaikan mode kartu pertama | kartu buka yang buruk membuat putaran kedua macet | baca bar keamanan putaran 2 sebelum membuka |
 | Menimpa sesi berharga dengan Reset | data hilang | tekan Export dulu sebelum Reset |

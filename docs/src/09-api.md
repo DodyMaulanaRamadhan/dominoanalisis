@@ -14,7 +14,7 @@ terima objek.
 | Ukuran maksimum isi | 1 MiB |
 | Autentikasi | hanya bila `APP_TOKEN` diisi: header `X-App-Token` pada semua `POST /api/*` |
 | Token pembanding | waktu-konstan (`hmac.compare_digest`) |
-| Batas beban | `numSims` antara 1 dan 100000; mesin dihentikan bila melewati 300 detik |
+| Batas beban | `numSims` antara 1 dan 1700000; mesin dihentikan bila melewati 300 detik |
 | Header balasan | `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, CSP ketat |
 | Tempat singgahan | balasan API `Cache-Control: no-store`; berkas statis `no-cache` |
 
@@ -90,7 +90,7 @@ diperbaiki serta dijaga oleh uji `meta_only_real_tiles`.
 
 | Bidang | Tipe | Bawaan | Arti |
 |---|---|---|---|
-| `numSims` | angka | 10000 | jumlah simulasi per kandidat langkah (1 sampai 2000000) |
+| `numSims` | angka | 10000 | jumlah simulasi per kandidat langkah (1 sampai 1700000) |
 | `seed` | angka | 42 | seed pembangkit acak; aplikasi web memakai 20240922 |
 | `leftEnd` / `rightEnd` | angka | −1 | angka di ujung kiri dan kanan papan; −1 berarti papan kosong |
 | `playedBy` | larik label | semua `"unknown"` | pemilik setiap kartu di `played`; panjangnya **harus sama**; nilai sah: `"me"`, `"unknown"`, `"opp1"` sampai `"opp4"` |
@@ -105,15 +105,21 @@ diperbaiki serta dijaga oleh uji `meta_only_real_tiles`.
 
 | Tingkat kepercayaan | Margin of error | Jumlah simulasi minimal | Tier di aplikasi |
 |---|---|---|---|
-| 95% | ±5,0% | 384 | — |
+| 95% | ±3,1% | ~1.000 | 1.000 (cepat) |
+| 95% | ±1,4% | ~5.000 | 5.000 |
 | 95% | ±1,0% | 9.604 (≈10 ribu) | 10.000 (bawaan) |
-| 95% | ±0,1% | 960.400 (≈1 juta) | 1.000.000 |
-| 99% | ±0,1% | 1.664.100 (≈1,7 juta) | 1.700.000 (tertinggi) |
-| 99% | ±0,01% | 166.410.000 (≈166 juta) | tidak ditawarkan — butuh berjam-jam per request, di luar batas 300 detik |
+| 95% | ±0,44% | ~50.000 | 50.000 |
+| 95% | ±0,1% | 960.400 (≈1 juta) | dicakup oleh tier 1.700.000 |
+| 99% | ±0,1% | 1.664.100 (≈1,7 juta) | 1.700.000 (dengan peringatan; lihat bab antarmuka) |
+| 99% | ±0,01% | 166.410.000 (≈166 juta) | tidak ditawarkan — berjam-jam per permintaan |
 
 Rumus: N = Z² × p(1−p) / E², dengan Z = 1,96 (95%) atau 2,58 (99%).
-Pada ~54 ribu gim/detik, tier tertinggi (~1,7 jt × jumlah kandidat langkah)
-umumnya selesai dalam 1–4 menit dan bisa dibatalkan dari tombol Batal.
+Pada mesin uji (6 inti fisik / 12 utas logis) mesin mengerjakan ~0,6–1,4 juta
+simulasi-langkah per detik (lihat `tools/bench_engine.py`), sehingga tier 1.700.000
+memakan **7 detik** untuk 3 kandidat langkah dan **~30 detik** untuk 12 kandidat
+langkah; efisiensi paralelnya 87% dari 6 inti fisik. Karena itu tier
+ini tidak berjalan otomatis: antarmuka meminta konfirmasi, mematikan mode Live,
+dan menyediakan tombol Batal yang benar-benar menghentikan proses mesin.
 
 ### Bentuk objek lawan
 
@@ -299,7 +305,7 @@ bahasa Indonesia yang bisa dibaca manusia.
 | 400 | `myHand/played: format kartu tidak dikenal (elemen ke-2)` | kunci kartu tidak sah |
 | 400 | `ada kartu duplikat di myHand` | kartu yang sama dua kali |
 | 400 | `kartu tidak bisa di tangan dan di papan sekaligus` | tumpang tindih antara `myHand` dan `played` |
-| 400 | `numSims harus angka 1..100000` | batas beban dilanggar |
+| 400 | `numSims harus angka 1..1700000` | batas beban dilanggar |
 | 400 | `nextSeat harus angka 0..3` | indeks pemain di luar batas |
 | 400 | `playedBy hanya boleh 'me', 'unknown', atau 'opp1'..'opp4'` | label pemain tidak dikenal |
 | 400 | `tieRule harus 'win' atau 'lose'` | nilai aturan tidak dikenal (ditolak mesin) |
@@ -335,7 +341,7 @@ echo '{"cmd":"analyze","numPlayers":2,"cardsPerPlayer":7,"numSims":200,"seed":1,
 | Keluaran | satu objek JSON ke keluaran standar, diakhiri baris baru |
 | Kode keluar | selalu 0; kesalahan dilaporkan sebagai `ok:false` di dalam JSON |
 | Normalisasi kartu | **tidak ada** — kunci harus sudah kanonik (`3-6`, bukan `6-3`) |
-| Validasi | tetap ketat; `numSims` dibatasi 1 sampai 100000 di dalam mesin |
+| Validasi | tetap ketat; `numSims` dibatasi 1 sampai 1700000 di dalam mesin |
 | Batas waktu | tidak ada; pemanggil yang menentukan (server memakai 300 detik) |
 
 Karena kode keluarnya selalu 0, **jangan** menyimpulkan keberhasilan dari kode keluar saja.
