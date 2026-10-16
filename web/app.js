@@ -27,6 +27,9 @@ const state = {
   lastAnalysis: null,// respons engine terakhir (untuk panel profil lawan)
   recommended: null, // { key, a, b, newLeft, newRight } rekomendasi #1 terakhir
   timeline: [],      // snapshot untuk undo global (maks 100)
+  heavyManualRun: false, // izin sekali-jalan untuk tier 1,7 juta (lihat runAnalysis)
+  lastSimCount: 10000,   // nilai tier sebelumnya, untuk membatalkan pilihan tier berat
+  liveBeforeHeavy: false, // Live dimatikan oleh tier berat? -> pulihkan saat tier turun
 };
 
 const SEED = 20240922; // deterministik: input sama -> hasil sama
@@ -142,7 +145,10 @@ function restoreFrom(obj) {
   $('playerCount').value = String(obj.setup.playerCount || 4);
   updateCardsPerPlayerOptions();
   $('cardsPerPlayer').value = String(obj.setup.cardsPerPlayer || 7);
-  $('simCount').value = String(obj.setup.simCount || 2000);
+  { const allowed = new Set(["1000", "5000", "10000", "50000", "1700000"]);
+    const sv = String(obj.setup.simCount || "10000");
+    $('simCount').value = allowed.has(sv) ? sv : "10000";
+    state.lastSimCount = parseInt($('simCount').value, 10) || 10000; }
   updateCardsPerPlayerOptions(); // re-populate nextSeat for this player count
   $('nextSeat').value = String(obj.setup.nextSeat || 1);
   if (obj.setup.deadlockRule) $('deadlockRule').value = obj.setup.deadlockRule;
@@ -158,6 +164,10 @@ function restoreFrom(obj) {
   initOpponents();
   updateSetupInfo();
   updateAll();
+  // Sesi impor bisa membawa tier berat. Dijalankan di akhir supaya bila Live
+  // dinyalakan kembali, ia memakai data sesi yang sudah lengkap — dan bila
+  // tiernya berat, peringatan serta label sekali-jalan langsung tampil.
+  syncHeavyTierUI();
   return true;
 }
 function loadState() {
@@ -178,8 +188,112 @@ function pushSnapshot() {
   }));
   if (state.timeline.length > 100) state.timeline.shift();
 }
+/* ---- tier simulasi berat (1,7 juta) --------------------------------------
+   Satu analisis tier tertinggi memakai seluruh inti CPU selama puluhan detik.
+   Karena itu: (1) pengguna diberi peringatan eksplisit sebelum memakainya,
+   (2) analisis TIDAK dijalankan otomatis di tiap langkah (tidak ada mode Live),
+   dan (3) tombol analisis berubah menjadi pemicu sekali-jalan. Tanpa aturan
+   ini, tiap penempatan kartu akan memicu 1,7 juta simulasi lagi sehingga CPU
+   tidak pernah berhenti dan aplikasi terasa membeku. ---- */
+const HEAVY_SIMS = 1000000;
+// Mikrodetik per simulasi-langkah pada 12 utas logis / 6 inti fisik (hasil ukur
+// tools/bench_engine.py: 1,4–1,7 µs pada 4 pemain; 0,7 µs pada 2 pemain). Dipakai
+// HANYA untuk indikator waktu, bukan janji; skalanya menyesuaikan utas & pemain.
+const SIM_US = 1.5;
+
+function simCountValue() {
+  return parseInt($('simCount').value, 10) || 10000;
+}
+function isHeavySims() {
+  return simCountValue() >= HEAVY_SIMS;
+}
+
+// Jumlah kandidat langkah dihitung sama seperti mesin menghitungnya: satu
+// langkah per ujung yang cocok (papan kosong -> satu langkah per kartu).
+function countCandidateMoves() {
+  const le = getLeftEnd();
+  const re = getRightEnd();
+  let n = 0;
+  for (const key of state.myHand) {
+    const parts = key.split('-');
+    const a = Number(parts[0]);
+    const b = Number(parts[1]);
+    if (le === -1 && re === -1) { n++; continue; }
+    if (a === le || b === le) n++;
+    if (a === re || b === re) n++;
+  }
+  return Math.max(1, n);
+}
+
+function estimateAnalysisMs(numSims, adversarial) {
+  const moves = countCandidateMoves();
+  const cores = Math.max(1, Math.min(navigator.hardwareConcurrency || 4, 32));
+  const players = parseInt($('playerCount').value, 10) || 4;
+  const faktorPemain = players === 2 ? 0.55 : players === 3 ? 0.8 : 1;
+  const usPerSim = SIM_US * (12 / cores) * faktorPemain * (adversarial ? 1.05 : 1);
+  return Math.max(500, (numSims * moves * usPerSim) / 1000);
+}
+function fmtDur(ms) {
+  const s = ms / 1000;
+  if (s < 1) return 'sekejap';
+  if (s < 90) return `~${Math.round(s)} detik`;
+  return `~${Math.round(s / 60)} menit`;
+}
+function heavyWarningText() {
+  const n = simCountValue().toLocaleString('id-ID');
+  const est = fmtDur(estimateAnalysisMs(simCountValue(), $('adversarial').checked));
+  return `${n} simulasi memberi interval keyakinan paling sempit (±0,1%), ` +
+    `tetapi satu analisis memakan waktu jauh lebih lama — perkiraan saat ini ` +
+    `${est} untuk ${countCandidateMoves()} pilihan langkah. Mode teliti, 4 pemain, ` +
+    'dan banyak pilihan langkah membuatnya paling lama. Analisis berjalan di ' +
+    'latar belakang, aplikasi tetap bisa dipakai, dan bisa dibatalkan dengan ' +
+    'tombol Batal (proses di komputer langsung dihentikan).';
+}
+function updateSimWarn() {
+  const el = $('simWarn');
+  if (!el) return;
+  if (isHeavySims()) {
+    el.innerHTML = `<strong>⚠️ Tier tertinggi — 1.700.000 simulasi.</strong> ` +
+      esc(heavyWarningText()) +
+      ' <br><strong>Mode Live dimatikan</strong> pada tier ini: analisis hanya ' +
+      'berjalan saat Anda menekan tombol analisis, tidak otomatis tiap langkah.';
+    el.classList.add('active');
+  } else {
+    el.classList.remove('active');
+    el.textContent = '';
+  }
+}
+function heavyTierBrand() {
+  return simCountValue() >= HEAVY_SIMS ? '1,7 jt' : 'berat';
+}
+function analyzeIdleLabel() {
+  if (state.liveMode) return '⏸ Jeda Live';
+  return isHeavySims() ? `▶️ Analisis ${heavyTierBrand()} (sekali)` : '▶️ Analisis Live';
+}
+
+/* Satu tempat yang menegakkan aturan tier berat, supaya jalur "ganti tier" dan
+   "import sesi" tidak bisa berperilaku berbeda:
+   1) tier berat mematikan Live (agar tidak ada ribuan analisis 1,7 juta berturut-turut),
+      dan Live dinyalakan kembali hanya kalau tadi memang ia yang mematikannya;
+   2) label tombol mengikuti tier sekarang, bukan tier sebelumnya;
+   3) banner peringatan mengikuti pilihan sekarang. */
+function syncHeavyTierUI() {
+  if (isHeavySims()) {
+    if (state.liveMode) { state.liveBeforeHeavy = true; setLiveMode(false); }
+  } else if (state.liveBeforeHeavy && !state.liveMode) {
+    state.liveBeforeHeavy = false;
+    setLiveMode(true); // sekaligus memperbarui label dan menjalankan analisis
+  }
+  if (!state.isAnalyzing) $('analyzeBtn').textContent = analyzeIdleLabel();
+  updateSimWarn();
+}
+
 /* ---- mode analisis LIVE (v3.2): play/stop, auto re-run tiap info baru ---- */
 function setLiveMode(on) {
+  if (on && isHeavySims()) {
+    updateSimWarn(); // tier berat: tuntaskan peringatan, jangan nyalakan Live
+    return;
+  }
   state.liveMode = on;
   const btn = $('analyzeBtn');
   const chip = $('liveChip');
@@ -195,7 +309,7 @@ function setLiveMode(on) {
     btn.textContent = '⏸ Jeda Live';
     runAnalysis();
   } else {
-    btn.textContent = '▶️ Analisis Live';
+    btn.textContent = analyzeIdleLabel();
     if (state.abortCtl) state.abortCtl.abort(); // hentikan run yang berjalan
   }
 }
@@ -1571,6 +1685,11 @@ function setProgress(pct, text, detail) {
 
 /* ---- analisis ---- */
 async function runAnalysis() {
+  // Tier berat hanya berjalan sekali saat dipicu tombol: pemanggilan otomatis
+  // dari aksi pengguna (main kartu, PASS, undo) diabaikan di sini.
+  const manualHeavyRun = state.heavyManualRun === true;
+  state.heavyManualRun = false;
+  if (isHeavySims() && !manualHeavyRun) { updateSimWarn(); return; }
   if (state.isAnalyzing) { state.pendingRun = true; return; } // antre: jalankan ulang setelah ini selesai
   // Papan kosong + tangan terisi = MODE KARTU PERTAMA: analisis langsung jalan
   // sehingga pemain pertama tahu kartu buka terbaik sejak awal. Tangan kosong
@@ -1593,15 +1712,28 @@ async function runAnalysis() {
   const hasPassData = state.opponents.some((o) => o.passes.length > 0);
   const hasAttrib = state.playedBy.some((w) => w && w.startsWith('opp'));
 
-  setProgress(
-    30,
-    '<span class="loading-icon">⏳</span> ' +
-      (isFirstMove ? '🎯 Analisis Kartu Pertama' : '🎯 Menganalisis...'),
-    `${req.myHand.length} kartu × ${req.numSims} sim (engine C++ v3)` +
+  const headText = '<span class="loading-icon">⏳</span> ' +
+    (isFirstMove ? '🎯 Analisis Kartu Pertama' : '🎯 Menganalisis...');
+  const baseDetail =
+    `${req.myHand.length} kartu × ${req.numSims.toLocaleString('id-ID')} sim (engine C++ v3)` +
       (hasPassData ? ' • data PASS' : '') +
       (hasAttrib ? ' • atribusi lawan' : '') +
-      (req.adversarial ? ' • mode teliti' : '')
-  );
+      (req.adversarial ? ' • mode teliti' : '');
+  // Indikator berjalan: bar merayap menuju 95% secara asimtotik (tidak pernah
+  // berbohong "hampir selesai") sambil menampilkan waktu berjalan dan perkiraan
+  // sisa. Penting pada tier 1,7 juta yang butuh puluhan detik.
+  const estMs = estimateAnalysisMs(req.numSims, req.adversarial);
+  const t0 = performance.now();
+  const tick = () => {
+    const el = performance.now() - t0;
+    const frac = Math.min(0.95, 0.35 + 0.6 * (1 - Math.exp(-el / Math.max(1200, estMs * 0.55))));
+    const sisa = estMs - el;
+    const eta = sisa > 800 ? ` • perkiraan sisa ~${Math.ceil(sisa / 1000)}s` : ' • hampir selesai…';
+    setProgress(Math.round(frac * 100), headText,
+                `${baseDetail} • ${(el / 1000).toFixed(1)}s berlalu${eta}`);
+  };
+  tick();
+  const progressTimer = setInterval(tick, 400);
 
   try {
     const data = await apiPost('/api/analyze', req, state.abortCtl.signal);
@@ -1625,8 +1757,9 @@ async function runAnalysis() {
         `<p><strong>Gagal menganalisis:</strong></p><p style="margin-top:5px;font-size:0.72rem;">${esc(friendlyError(err.message))}</p></div>`;
     }
   } finally {
+    clearInterval(progressTimer);
     btn.disabled = false;
-    btn.textContent = state.liveMode ? '⏸ Jeda Live' : '▶️ Analisis Live';
+    btn.textContent = analyzeIdleLabel();
     state.isAnalyzing = false;
     state.abortCtl = null;
     if (state.liveMode && state.pendingRun) {
@@ -1906,7 +2039,39 @@ $('handModal').addEventListener('click', (e) => {
 $('choiceLeft').addEventListener('click', () => chooseEnd('left'));
 $('choiceRight').addEventListener('click', () => chooseEnd('right'));
 $('attribUnknown').addEventListener('click', () => resolveAttribution('unknown'));
-$('analyzeBtn').addEventListener('click', () => setLiveMode(!state.liveMode));
+$('analyzeBtn').addEventListener('click', () => {
+  if (isHeavySims()) {
+    // Tier berat: tombol = "analisis sekali" (atau Batal saat berjalan).
+    if (state.isAnalyzing) { cancelAnalysis(); return; }
+    state.heavyManualRun = true;
+    runAnalysis();
+    return;
+  }
+  setLiveMode(!state.liveMode);
+});
+
+// Perubahan tier simulasi: konfirmasi untuk tier berat, dan cegah mode Live
+// menjalankan 1,7 juta simulasi berulang-ulang tanpa kendali.
+$('simCount').addEventListener('change', () => {
+  const now = simCountValue();
+  const prev = Number(state.lastSimCount) || 10000;
+  if (now >= HEAVY_SIMS && now > prev) {
+    const lanjut = confirm(
+      '⚠️ PERINGATAN — tier 1.700.000 simulasi\n\n' + heavyWarningText() +
+      '\n\nMode Live akan dimatikan; analisis hanya berjalan saat Anda menekan ' +
+      'tombol analisis.\n\nLanjutkan memakai tier ini?'
+    );
+    if (!lanjut) {
+      $('simCount').value = String(prev);
+      updateSimWarn();
+      return;
+    }
+  }
+  state.lastSimCount = now;
+  syncHeavyTierUI(); // aturan tier berat, label tombol, banner peringatan
+  updateAll();
+  saveState();
+});
 $('undoBtn').addEventListener('click', undoLastAction);
 $('exportBtn').addEventListener('click', exportSession);
 $('importBtn').addEventListener('click', () => $('importFile').click());
@@ -1919,10 +2084,15 @@ $('resetBtn').addEventListener('click', resetGame);
 updateCardsPerPlayerOptions();
 initOpponents();
 loadState();
+if (!state.lastSimCount) state.lastSimCount = simCountValue();
+updateSimWarn();
 updateAll();
 
 /* ---- LIVE mode aktif otomatis sejak aplikasi dibuka (v3.2) ---- */
 setLiveMode(true);
+// Tier berat yang tersimpan dari sesi sebelumnya: Live memang tidak menyala,
+// jadi label tombol harus menjelaskan bahwa analisis dipicu manual.
+if (isHeavySims()) $('analyzeBtn').textContent = analyzeIdleLabel();
 
 /* ---- PWA ---- */
 if ('serviceWorker' in navigator) {

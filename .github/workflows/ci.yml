@@ -41,3 +41,18 @@ jobs:
       - uses: actions/checkout@v4
       - name: Run server tests (engine-dependent tests skip gracefully)
         run: python tools/test_server.py
+
+  ui-headless:
+    name: Headless UI tests (tier 1.700.000)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Playwright + Chromium
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install playwright
+          python -m playwright install --with-deps chromium
+      - name: Build engine
+        run: python tools/build_engine.py --force
+      - name: Headless UI test (warning, decline, label, cancel kills engine)
+        run: python tools/test_ui_heavy.py

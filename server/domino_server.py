@@ -27,8 +27,13 @@ import json
 import os
 import pathlib
 import re
+import select
+import socket
 import subprocess
 import sys
+import tempfile
+import threading
+import time
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -42,6 +47,25 @@ if PORT <= 0:
     PORT = 2024  # PORT=0 biasanya artefak environment, bukan niat pengguna
 APP_TOKEN = os.environ.get("APP_TOKEN", "").strip()
 MAX_BODY = 1 << 20  # 1 MiB
+
+# Mesin C++ memakai SELURUH inti CPU untuk satu permintaan (DOMINO_THREADS).
+# Tanpa pembatas, N permintaan bersamaan berebut inti yang sama: setiap
+# permintaan jadi lebih lambat dan waktu responsnya tak terduga. Jadi mesin
+# dijalankan bergiliran (antrean) — satu permintaan pada satu waktu = kecepatan
+# penuh per permintaan.
+def _env_int(name: str, default: int, low: int = 1) -> int:
+    try:
+        return max(low, int(os.environ.get(name, default)))
+    except (TypeError, ValueError):
+        return default
+
+
+MAX_CONCURRENT_ENGINE = _env_int("DOMINO_MAX_ENGINE", 1)
+ENGINE_QUEUE_WAIT = _env_int("DOMINO_ENGINE_WAIT", 60, low=1)
+ENGINE_TIMEOUT = _env_int("DOMINO_ENGINE_TIMEOUT", 300, low=1)
+# Selang pemeriksaan "klien masih tersambung?" saat mesin berjalan.
+CANCEL_POLL = 0.2
+_ENGINE_SLOTS = threading.BoundedSemaphore(MAX_CONCURRENT_ENGINE)
 
 # Dikirim di SETIAP respons (static & JSON): anti-sniff, anti-clickjacking,
 # CSP minimal — app hanya memuat aset same-origin tanpa inline script.
@@ -94,37 +118,103 @@ def normalize_tile_list(value) -> tuple[list[str] | None, str]:
     return out, ""
 
 
-def engine_command(payload: dict) -> tuple[dict, HTTPStatus]:
+def client_gone(conn) -> bool:
+    """True bila klien sudah menutup koneksi (tekan Batal / tutup tab).
+
+    MSG_PEEK: intip byte pertama tanpa mengambilnya, jadi permintaan yang sudah
+    antre di soket tetap utuh. Soket yang ditutup klien menjadi "readable" dan
+    recv mengembalikan b"".
+    """
+    try:
+        readable, _, _ = select.select([conn], [], [], 0)
+        if not readable:
+            return False
+        return conn.recv(1, socket.MSG_PEEK) == b""
+    except (OSError, ValueError, AttributeError):
+        return True
+
+
+def run_engine(payload: bytes, cancel_check=None) -> tuple[int | None, bytes, bytes, bool]:
+    """Jalankan mesin. Return (returncode, stdout, stderr, cancelled).
+
+    returncode None = melewati batas waktu. Bila `cancel_check` mengembalikan
+    True, proses mesin langsung dimatikan: analisis 1,7 juta simulasi tidak
+    boleh terus memakai seluruh inti CPU setelah pengguna menekan Batal.
+
+    stdout/stderr dialihkan ke berkas sementara, BUKAN pipa: keluaran mesin bisa
+    melebihi kapasitas buffer pipa (~64 KiB pada balasan dengan banyak langkah),
+    dan pipa yang penuh akan memblokir mesin. stdin juga berkas, sehingga
+    menulis payload besar tidak bisa mengunci proses di kedua sisi.
+    """
+    with tempfile.TemporaryFile() as fin, \
+            tempfile.TemporaryFile() as fout, \
+            tempfile.TemporaryFile() as ferr:
+        fin.write(payload)
+        fin.seek(0)
+        proc = subprocess.Popen([str(ENGINE)], stdin=fin, stdout=fout, stderr=ferr)
+        deadline = time.monotonic() + ENGINE_TIMEOUT
+        cancelled = False
+        timed_out = False
+        while True:
+            try:
+                proc.wait(timeout=CANCEL_POLL)
+                break
+            except subprocess.TimeoutExpired:
+                if cancel_check is not None and cancel_check():
+                    cancelled = True
+                    break
+                if time.monotonic() > deadline:
+                    timed_out = True
+                    break
+        if cancelled or timed_out:
+            proc.kill()
+            proc.wait()
+        fout.seek(0)
+        ferr.seek(0)
+        return (None if timed_out else proc.returncode, fout.read(), ferr.read(), cancelled)
+
+
+def engine_command(payload: dict, cancel_check=None) -> tuple[dict | None, HTTPStatus | None]:
     """Send a JSON payload to the C++ engine.
 
     Return (result, status). `result` is what the engine produced (or an error
     dict we synthesised); `status` is the HTTP status the caller MUST send —
     never 200 for a failed command, so external clients can branch on the
     status code alone instead of having to parse the body.
+
+    Return (None, None) bila pekerjaan dibatalkan karena klien menutup koneksi:
+    pemanggil tidak perlu (dan tidak bisa) mengirim balasan.
     """
     if not ENGINE.exists():
         return ({"ok": False,
                  "error": "engine belum di-build. Jalankan: python tools/build_engine.py"},
                 HTTPStatus.SERVICE_UNAVAILABLE)
-    try:
-        proc = subprocess.run(
-            [str(ENGINE)],
-            input=json.dumps(payload).encode("utf-8"),
-            capture_output=True,
-            timeout=300,
-        )
-    except subprocess.TimeoutExpired:
-        return ({"ok": False, "error": "engine timeout (>300s)"},
-                HTTPStatus.GATEWAY_TIMEOUT)
-    if proc.returncode != 0:
-        # Detail crash hanya untuk log server — jangan bocorkan ke klien.
-        print(f"[engine] exit {proc.returncode}: "
-              f"{proc.stderr.decode(errors='replace')[:400]}", file=sys.stderr)
+    # Antrean: cegah beberapa proses mesin memperebutkan inti CPU yang sama.
+    if not _ENGINE_SLOTS.acquire(timeout=ENGINE_QUEUE_WAIT):
         return ({"ok": False,
-                 "error": f"engine error (exit {proc.returncode}) — detail ada di log server"},
+                 "error": f"server sibuk: antrean mesin penuh (> {ENGINE_QUEUE_WAIT}s). "
+                          "Coba lagi atau naikkan DOMINO_MAX_ENGINE."},
+                HTTPStatus.SERVICE_UNAVAILABLE)
+    try:
+        code, stdout_b, stderr_b, cancelled = run_engine(
+            json.dumps(payload).encode("utf-8"), cancel_check)
+    finally:
+        _ENGINE_SLOTS.release()
+    if cancelled:
+        print("[engine] dibatalkan: klien menutup koneksi", file=sys.stderr)
+        return (None, None)
+    if code is None:
+        return ({"ok": False, "error": f"engine timeout (>{ENGINE_TIMEOUT}s)"},
+                HTTPStatus.GATEWAY_TIMEOUT)
+    if code != 0:
+        # Detail crash hanya untuk log server — jangan bocorkan ke klien.
+        print(f"[engine] exit {code}: "
+              f"{stderr_b.decode(errors='replace')[:400]}", file=sys.stderr)
+        return ({"ok": False,
+                 "error": f"engine error (exit {code}) — detail ada di log server"},
                 HTTPStatus.INTERNAL_SERVER_ERROR)
     try:
-        out = json.loads(proc.stdout.decode("utf-8"))
+        out = json.loads(stdout_b.decode("utf-8"))
     except json.JSONDecodeError:
         return ({"ok": False, "error": "engine menghasilkan output tidak valid"},
                 HTTPStatus.BAD_GATEWAY)
@@ -155,15 +245,15 @@ def validate_analyze(req: dict) -> str | None:
     if n * c > 28:
         return "total kartu melebihi 28"
 
-    # numSims = work factor per request — wajib dibatasi (anti-DoS CPU)
-    # Tier akurasi tertinggi (99% ±0,1%) butuh 1.664.100 sim; batas 2 jt.
-    # 166 jt (99% ±0,01%) tidak feasible per-request (berjam-jam) -> ditolak.
+    # numSims = work factor per request — wajib dibatasi (anti-DoS CPU).
+    # Tier tertinggi 1.700.000 (≈95% ±0,1%) selesai dalam puluhan detik pada
+    # mesin multi-inti, jadi tetap aman terhadap batas waktu 300 detik.
     try:
         nsims = int(req.get("numSims", 10000))
     except (TypeError, ValueError):
-        return "numSims harus angka 1..2000000"
-    if not (1 <= nsims <= 2000000):
-        return "numSims harus angka 1..2000000"
+        return "numSims harus angka 1..1700000"
+    if not (1 <= nsims <= 1700000):
+        return "numSims harus angka 1..1700000"
     req["numSims"] = nsims
 
     hand = req.get("myHand", [])
@@ -227,6 +317,12 @@ class Handler(BaseHTTPRequestHandler):
     server_version = "DominoAnalyzerPy/3.0"
 
     # ---- helpers -------------------------------------------------------
+    def _engine_cancel_check(self) -> bool:
+        """Bila peramban membatalkan analisis (tombol Batal / tutup tab), soket
+        ditutup. Dipakai mesin agar berhenti bekerja, bukan menyelesaikan
+        analisis 1,7 juta simulasi yang hasilnya sudah tidak ada penerimanya."""
+        return client_gone(self.connection)
+
     def _send_json(self, obj: dict, status: HTTPStatus = HTTPStatus.OK) -> None:
         body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
@@ -236,7 +332,10 @@ class Handler(BaseHTTPRequestHandler):
         for k, v in SECURITY_HEADERS.items():
             self.send_header(k, v)
         self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            pass  # klien menutup koneksi lebih dulu (dibatalkan) — bukan kegagalan server
 
     def _send_static(self, rel: str) -> None:
         web_root = WEB_DIR.resolve()
@@ -268,7 +367,10 @@ class Handler(BaseHTTPRequestHandler):
         for k, v in SECURITY_HEADERS.items():
             self.send_header(k, v)
         self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
 
     def _read_json_body(self) -> dict | None:
         # CORS "simple request" (Content-Type text/plain) dikirim browser tanpa
@@ -361,11 +463,17 @@ class Handler(BaseHTTPRequestHandler):
             if err:
                 self._send_json({"ok": False, "error": err}, HTTPStatus.BAD_REQUEST)
                 return
-            result, status = engine_command(body)
+            result, status = engine_command(body, cancel_check=self._engine_cancel_check)
+            if result is None:
+                return  # dibatalkan klien: tidak ada balasan yang perlu dikirim
             self._send_json(result, status)
         elif path == "/api/selftest":
             # Self-test gagal = engine bermasalah, bukan salah permintaan.
-            result, status = engine_command({"cmd": "selftest"})
+            # Selftest memang lama (belasan detik): batalkan hanya bila klien pergi.
+            result, status = engine_command({"cmd": "selftest"},
+                                            cancel_check=self._engine_cancel_check)
+            if result is None:
+                return
             if status == HTTPStatus.OK and result.get("ok") is False:
                 status = HTTPStatus.INTERNAL_SERVER_ERROR
             self._send_json(result, status)

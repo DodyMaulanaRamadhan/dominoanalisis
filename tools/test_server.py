@@ -11,6 +11,7 @@ import json
 import os
 import pathlib
 import sys
+import time
 import unittest
 import urllib.request
 
@@ -113,20 +114,46 @@ class TestValidate(unittest.TestCase):
         self.assertIsNotNone(ds.validate_analyze(bad))
 
     def test_numSims_bounds(self):
-        # anti-DoS: wajib 1..2000000; hilang -> default 10000; bukan angka -> tolak
+        # anti-DoS: wajib 1..1700000; hilang -> default 10000; bukan angka -> tolak
         self.assertIsNone(ds.validate_analyze(self.base_ok()))
-        lo = self.base_ok(); lo["numSims"] = 1
-        self.assertIsNone(ds.validate_analyze(lo))
-        hi = self.base_ok(); hi["numSims"] = 2000000
-        self.assertIsNone(ds.validate_analyze(hi))
-        # tier tertinggi 99% ±0,1% (1.664.100) harus VALID; 166 jt ditolak
-        top = self.base_ok(); top["numSims"] = 1664100
-        self.assertIsNone(ds.validate_analyze(top))
-        # hanya nilai luar range yang ditolak
-        for v in (0, -5, 10**12, "banyak", None):
+        for v in (1, 50001, 100000, 1700000):
+            ok = self.base_ok(); ok["numSims"] = v
+            self.assertIsNone(ds.validate_analyze(ok), f"numSims={v!r} harus diterima")
+        # hanya nilai di luar range yang ditolak (batas atas tetap penjaga CPU)
+        for v in (1700001, 10**7, 0, -5, 10**12, "banyak", None):
             bad = self.base_ok(); bad["numSims"] = v
             self.assertIsNotNone(ds.validate_analyze(bad),
                                  f"numSims={v!r} harus ditolak")
+
+    def test_client_gone_detects_disconnect(self):
+        # soket hidup -> False; soket ditutup klien -> True (dipakai untuk
+        # menghentikan mesin saat pengguna menekan Batal).
+        import socket as _socket
+        srv, cli = _socket.socketpair()
+        try:
+            self.assertFalse(ds.client_gone(srv), "soket terbuka harus dianggap hidup")
+            cli.close()
+            self.assertTrue(ds.client_gone(srv), "soket tertutup harus terdeteksi")
+        finally:
+            srv.close()
+
+    def test_run_engine_cancel_kills_process(self):
+        # Pembatalan harus menghentikan proses mesin segera, bukan menunggu
+        # analisis berat selesai (CPU terbuang untuk hasil yang tak dipakai).
+        if not ds.ENGINE.exists():
+            self.skipTest("engine belum di-build")
+        payload = json.dumps({
+            "cmd": "analyze", "numPlayers": 4, "cardsPerPlayer": 7, "numSims": 400000,
+            "seed": 7, "leftEnd": 3, "rightEnd": 5,
+            "myHand": ["0-0", "1-2", "3-3", "4-6", "5-5", "6-6", "2-3"],
+            "played": ["3-4", "1-5", "2-6"], "opponents": [{}, {}, {}],
+        }).encode("utf-8")
+        t0 = time.monotonic()
+        code, out, _err, cancelled = ds.run_engine(payload, cancel_check=lambda: True)
+        elapsed = time.monotonic() - t0
+        self.assertTrue(cancelled, "cancel_check True harus menandai pembatalan")
+        self.assertLess(elapsed, 5.0, f"pembatalan terlalu lambat ({elapsed:.1f}s)")
+        self.assertEqual(out, b"", "mesin yang dibatalkan tidak boleh menghasilkan JSON utuh")
 
 
 class TestServerLive(unittest.TestCase):
@@ -310,7 +337,7 @@ class TestServerLive(unittest.TestCase):
         self.assertTrue(data["ok"])
 
     def test_numSims_out_of_range_rejected(self):
-        # nilai di dalam range 1..2000000 VALID,
+        # nilai di dalam range 1..1700000 VALID,
         # hanya nilai luar range yang ditolak
         for v in (10**12, 0):
             status, data = http_post(self.port, "/api/analyze",
