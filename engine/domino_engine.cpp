@@ -28,6 +28,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -38,6 +39,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 static const char* ENGINE_VERSION = "3.0.0";
@@ -328,6 +330,12 @@ struct Rng {
     int nextInt(int n) { return static_cast<int>(next() % static_cast<uint64_t>(n)); }
 
     void shuffle(std::vector<int>& a) {
+        // Penjaga wajib: pada vector kosong `a.size() - 1` = SIZE_MAX sehingga
+        // nextInt(0) melakukan modulo nol (STATUS_INTEGER_DIVIDE_BY_ZERO) dan
+        // swap menulis di luar batas. Permintaan sah dengan pool tak diketahui
+        // kosong (mis. 2 pemain x 14 kartu, semua kartu sudah diketahui)
+        // membuat mesin crash sebelum perbaikan ini.
+        if (a.size() < 2) return;
         for (size_t k = a.size() - 1; k > 0; --k) {
             size_t j = static_cast<size_t>(nextInt(static_cast<int>(k) + 1));
             std::swap(a[k], a[j]);
@@ -338,10 +346,15 @@ struct Rng {
 // ---------------------------------------------------------------------------
 // Dominance / number-map heuristics
 // ---------------------------------------------------------------------------
+// Fixed-size (tidak ada alokasi heap): analyzeDominance dipanggil puluhan kali
+// per simulasi, jadi vector di sini membuat jutaan malloc pada permintaan 50 rb
+// simulasi. Kapasitas 7 = jumlah angka kartu (0..6), jadi tidak pernah kurang.
 struct Dominance {
     std::array<int, 7> counts{};
-    std::vector<std::pair<int, int>> dominant; // (num, count), count >= 3
-    std::vector<std::pair<int, int>> strong;   // (num, count), count == 2
+    std::array<std::pair<int, int>, 7> dominant{}; // (num, count), count >= 3
+    std::array<std::pair<int, int>, 7> strong{};   // (num, count), count == 2
+    int nDominant = 0;
+    int nStrong = 0;
 };
 
 static Dominance analyzeDominance(const std::vector<int>& hand) {
@@ -350,15 +363,23 @@ static Dominance analyzeDominance(const std::vector<int>& hand) {
         d.counts[g_tiles[id].a]++;
         d.counts[g_tiles[id].b]++;
     }
-    std::vector<std::pair<int, int>> ranked;
-    for (int n = 0; n <= 6; ++n) ranked.emplace_back(n, d.counts[n]);
-    std::stable_sort(ranked.begin(), ranked.end(),
-                     [](const std::pair<int, int>& x, const std::pair<int, int>& y) {
-                         return x.second > y.second;
-                     });
-    for (const auto& r : ranked) {
-        if (r.second >= 3) d.dominant.push_back(r);
-        else if (r.second == 2) d.strong.push_back(r);
+    std::array<std::pair<int, int>, 7> ranked{};
+    for (int n = 0; n <= 6; ++n) ranked[n] = {n, d.counts[n]};
+    // Insertion sort stabil, urutan hasil identik dengan
+    // std::stable_sort(..., counts desc) tetapi tanpa alokasi buffer.
+    for (int i = 1; i < 7; ++i) {
+        std::pair<int, int> cur = ranked[i];
+        int j = i;
+        while (j > 0 && ranked[j - 1].second < cur.second) {
+            ranked[j] = ranked[j - 1];
+            --j;
+        }
+        ranked[j] = cur;
+    }
+    for (int k = 0; k < 7; ++k) {
+        const std::pair<int, int>& r = ranked[k];
+        if (r.second >= 3) d.dominant[d.nDominant++] = r;
+        else if (r.second == 2) d.strong[d.nStrong++] = r;
     }
     return d;
 }
@@ -394,16 +415,29 @@ struct Deal {
 //   2. `elim[p]`  — numbers this opponent certainly does not hold (PASS data).
 // Opponents with the tightest constraints are served first; when a quota
 // cannot be met feasibly, the constraint is relaxed (counted as a fallback).
-static Deal dealConstrained(const std::vector<int>& unknownIn, int numOpp, int totalOppCards,
+// Buffer pembagian yang dipakai ulang (dipakai ribuan simulasi per permintaan).
+struct DealScratch {
+    std::vector<int> available;
+    std::vector<int> quotas;
+    std::array<int, 4> order{}; // maksimum 4 pemain
+};
+
+// Hasil ditulis ke `d` (kapasitas vektor dipertahankan). Urutan kartu dan
+// urutan konsumsi RNG identik dengan versi yang mengalokasi Deal baru tiap sim.
+static void dealConstrained(const std::vector<int>& unknownIn, int numOpp, int totalOppCards,
                             const std::vector<std::vector<int>>& elim,
-                            const std::vector<std::vector<int>>& held, Rng& rng) {
-    Deal d;
-    d.oppHands.assign(numOpp, {});
-    std::vector<int> available = unknownIn;
+                            const std::vector<std::vector<int>>& held, Rng& rng,
+                            DealScratch& sc, Deal& d) {
+    d.fallbacks = 0;
+    d.oppHands.resize(numOpp);
+    for (auto& h : d.oppHands) h.clear();
+    std::vector<int>& available = sc.available;
+    available.assign(unknownIn.begin(), unknownIn.end());
     rng.shuffle(available);
 
     int per = numOpp > 0 ? totalOppCards / numOpp : 0;
-    std::vector<int> quotas(numOpp, 0);
+    std::vector<int>& quotas = sc.quotas;
+    quotas.resize(numOpp, 0);
     int assigned = 0;
     for (int p = 0; p < numOpp; ++p) {
         quotas[p] = (p == numOpp - 1) ? totalOppCards - assigned : per;
@@ -418,13 +452,22 @@ static Deal dealConstrained(const std::vector<int>& unknownIn, int numOpp, int t
         return p < static_cast<int>(held.size()) ? held[p] : kEmpty;
     };
 
-    std::vector<int> order(numOpp);
-    for (int p = 0; p < numOpp; ++p) order[p] = p;
-    std::stable_sort(order.begin(), order.end(), [&](int a, int b) {
-        size_t wa = elimOf(a).size() + heldOf(a).size() * 2;
-        size_t wb = elimOf(b).size() + heldOf(b).size() * 2;
-        return wa > wb; // tightest constraints first
-    });
+    // Insertion sort stabil: urutan persis sama dengan stable_sort di atas
+    // (bobot terbesar dulu, yang sama tetap urut aslinya), tanpa alokasi.
+    auto cw = [&](int p) -> size_t {
+        return elimOf(p).size() + heldOf(p).size() * 2;
+    };
+    for (int p = 0; p < numOpp; ++p) sc.order[p] = p;
+    for (int i = 1; i < numOpp; ++i) {
+        int cur = sc.order[i];
+        size_t wcur = cw(cur);
+        int j = i;
+        while (j > 0 && cw(sc.order[j - 1]) < wcur) {
+            sc.order[j] = sc.order[j - 1];
+            --j;
+        }
+        sc.order[j] = cur; // tightest constraints first
+    }
 
     auto violates = [&](int tileIdX, const std::vector<int>& e) {
         for (int n : e)
@@ -441,7 +484,8 @@ static Deal dealConstrained(const std::vector<int>& unknownIn, int numOpp, int t
         return false;
     };
 
-    for (int p : order) {
+    for (int pi = 0; pi < numOpp; ++pi) {
+        int p = sc.order[pi];
         int quota = quotas[p];
         if (quota <= 0) continue;
         const std::vector<int>& e = elimOf(p);
@@ -468,8 +512,8 @@ static Deal dealConstrained(const std::vector<int>& unknownIn, int numOpp, int t
             d.fallbacks++;
         }
     }
-    d.boneyard = std::move(available);
-    return d;
+    // assign (bukan move): kapasitas d.boneyard tetap terpakai antar-simulasi.
+    d.boneyard.assign(available.begin(), available.end());
 }
 
 // ---------------------------------------------------------------------------
@@ -486,21 +530,32 @@ struct AppliedMove {
     int le, re;
 };
 
-static std::vector<Move> getValidMoves(const std::vector<int>& hand, int le, int re) {
-    std::vector<Move> moves;
+// Kapasitas maksimum: 28 kartu x 2 ujung = 56 langkah. Buffer tetap 64.
+static constexpr int MAX_MOVES = 64;
+
+// Jalur panas: tulis langkah ke buffer milik pemanggil (tanpa alokasi heap).
+// Urutan langkah identik dengan versi vector di bawah.
+static int getValidMovesInto(const std::vector<int>& hand, int le, int re, Move* out) {
+    int n = 0;
     for (int id : hand) {
         int a = g_tiles[id].a, b = g_tiles[id].b;
         if (le != -1) {
-            if (a == le) moves.push_back({id, 1, b, a, b});
-            else if (b == le) moves.push_back({id, 1, a, a, b});
+            if (a == le) out[n++] = {id, 1, b, a, b};
+            else if (b == le) out[n++] = {id, 1, a, a, b};
         }
         if (re != -1) {
-            if (a == re) moves.push_back({id, 2, b, a, b});
-            else if (b == re) moves.push_back({id, 2, a, a, b});
+            if (a == re) out[n++] = {id, 2, b, a, b};
+            else if (b == re) out[n++] = {id, 2, a, a, b};
         }
-        if (le == -1 && re == -1) moves.push_back({id, 0, -1, a, b});
+        if (le == -1 && re == -1) out[n++] = {id, 0, -1, a, b};
     }
-    return moves;
+    return n;
+}
+
+static std::vector<Move> getValidMoves(const std::vector<int>& hand, int le, int re) {
+    std::array<Move, MAX_MOVES> buf{};
+    int n = getValidMovesInto(hand, le, re, buf.data());
+    return std::vector<Move>(buf.begin(), buf.begin() + n);
 }
 
 static AppliedMove applyMove(const std::vector<int>& hand, const Move& m, int le, int re) {
@@ -521,31 +576,49 @@ static AppliedMove applyMove(const std::vector<int>& hand, const Move& m, int le
 static std::optional<Move> aiChooseMove(const std::vector<int>& hand, int le, int re,
                                         const Dominance& dom, const NumMap& nm, Rng& rng,
                                         AiStyle style = AiStyle::MIXED, bool noise = true) {
-    auto moves = getValidMoves(hand, le, re);
-    if (moves.empty()) return std::nullopt;
+    // Tanpa alokasi: langkah masuk buffer stack, dan sisa tangan TIDAK disalin.
+    // Nilai turunan (flex / kemunculan angka ujung) dihitung satu lintasan
+    // sambil melewati kartu yang dimainkan — hasil identik dengan versi yang
+    // menyalin `after.hand`, tetapi tanpa ribuan malloc per simulasi.
+    std::array<Move, MAX_MOVES> movesBuf{};
+    int nmoves = getValidMovesInto(hand, le, re, movesBuf.data());
+    if (nmoves == 0) return std::nullopt;
 
-    const Move* best = nullptr;
+    int bestIdx = -1;
     double bestScore = -1e18;
-    for (const Move& m : moves) {
+    for (int mi = 0; mi < nmoves; ++mi) {
+        const Move& m = movesBuf[mi];
         double s = 0;
         int a = m.a, b = m.b;
-        AppliedMove after = applyMove(hand, m, le, re);
+
+        // ujung papan setelah langkah ini (persis seperti applyMove)
+        int afterL = le, afterR = re;
+        if (m.side == 0) { afterL = m.a; afterR = m.b; }
+        else if (m.side == 1) afterL = m.newEnd;
+        else afterR = m.newEnd;
 
         // unknown counts after this tile leaves the pool
-        int unkAfterL = (le != -1) ? nm.unk[after.le] : 0;
-        int unkAfterR = (re != -1) ? nm.unk[after.re] : 0;
+        int unkAfterL = (le != -1) ? nm.unk[afterL] : 0;
+        int unkAfterR = (re != -1) ? nm.unk[afterR] : 0;
         int playedPipDropL = 0, playedPipDropR = 0;
-        if (le != -1 && (g_tiles[m.tileId].a == after.le || g_tiles[m.tileId].b == after.le))
+        if (le != -1 && (g_tiles[m.tileId].a == afterL || g_tiles[m.tileId].b == afterL))
             playedPipDropL = 1;
-        if (re != -1 && (g_tiles[m.tileId].a == after.re || g_tiles[m.tileId].b == after.re))
+        if (re != -1 && (g_tiles[m.tileId].a == afterR || g_tiles[m.tileId].b == afterR))
             playedPipDropR = 1;
         unkAfterL -= playedPipDropL;
         unkAfterR -= playedPipDropR;
 
         int flex = 0;
-        for (int id : after.hand) {
+        int occL = 0, occR = 0;      // kemunculan angka pada ujung (balak = 2)
+        bool haveL = false, haveR = false;
+        for (int id : hand) {
+            if (id == m.tileId) continue;
             const Tile& t = g_tiles[id];
-            if (t.a == after.le || t.b == after.le || t.a == after.re || t.b == after.re) flex++;
+            bool tl = (t.a == afterL || t.b == afterL);
+            bool tr = (t.a == afterR || t.b == afterR);
+            if (tl || tr) flex++;
+            if (tl) { haveL = true; if (t.a == afterL) ++occL; if (t.b == afterL) ++occL; }
+            if (tr) { haveR = true; if (t.a == afterR) ++occR; if (t.b == afterR) ++occR; }
         }
 
         switch (style) {
@@ -555,18 +628,19 @@ static std::optional<Move> aiChooseMove(const std::vector<int>& hand, int le, in
                 s += -(unkAfterL + unkAfterR) * 6.0;
                 s += flex * 5.0;
                 s += (a + b) * 1.0;
-                if (after.le == after.re && !flex && unkAfterL > 0) s -= 15;
+                if (afterL == afterR && !flex && unkAfterL > 0) s -= 15;
                 break;
             }
             case AiStyle::HOARDER: {
                 // keep own dominant numbers on the table, never waste them
-                for (const auto& dnum : dom.dominant) {
-                    if (after.le == dnum.first || after.re == dnum.first) s += 40;
+                for (int k = 0; k < dom.nDominant; ++k) {
+                    const std::pair<int, int>& dnum = dom.dominant[k];
+                    if (afterL == dnum.first || afterR == dnum.first) s += 40;
                     if (a == dnum.first || b == dnum.first) s -= 25;
                     if (a == b && a == dnum.first) s -= 40;
                 }
-                for (const auto& st : dom.strong)
-                    if (after.le == st.first || after.re == st.first) s += 15;
+                for (int k = 0; k < dom.nStrong; ++k)
+                    if (afterL == dom.strong[k].first || afterR == dom.strong[k].first) s += 15;
                 s += flex * 2.0 + (a + b) * 0.5;
                 break;
             }
@@ -581,29 +655,24 @@ static std::optional<Move> aiChooseMove(const std::vector<int>& hand, int le, in
                 if (a == b) s += 18;
                 s += (a + b) * 1.8;
 
-                for (const auto& dnum : dom.dominant) {
-                    if (after.le == dnum.first && after.re == dnum.first) s += 50;
-                    if (after.le == dnum.first || after.re == dnum.first) s += 25;
+                for (int k = 0; k < dom.nDominant; ++k) {
+                    const std::pair<int, int>& dnum = dom.dominant[k];
+                    if (afterL == dnum.first && afterR == dnum.first) s += 50;
+                    if (afterL == dnum.first || afterR == dnum.first) s += 25;
                     if (a == dnum.first || b == dnum.first) s += 8;
                 }
-                for (const auto& st : dom.strong)
-                    if (after.le == st.first || after.re == st.first) s += 12;
+                for (int k = 0; k < dom.nStrong; ++k)
+                    if (afterL == dom.strong[k].first || afterR == dom.strong[k].first) s += 12;
 
-                int ends[2] = {after.le, after.re};
+                int ends[2] = {afterL, afterR};
                 for (int e : ends) {
-                    int mineLeft = 0;
-                    for (int id : after.hand) {
-                        if (g_tiles[id].a == e) mineLeft++;
-                        if (g_tiles[id].b == e) mineLeft++;
-                    }
+                    int mineLeft = (e == afterL) ? occL : occR;
                     if (mineLeft >= 2 && nm.unk[e] <= 2) s += 15;
                     if (mineLeft > 0 && nm.unk[e] == 0) s += 25;
                 }
-                if (after.le == after.re) {
-                    int e = after.le;
-                    bool weHave = false;
-                    for (int id : after.hand)
-                        if (g_tiles[id].a == e || g_tiles[id].b == e) { weHave = true; break; }
+                if (afterL == afterR) {
+                    int e = afterL;
+                    bool weHave = haveL;
                     if (!weHave && nm.unk[e] > 0) s -= 20;
                     else if (!weHave && nm.unk[e] == 0) s += 30;
                 }
@@ -613,9 +682,12 @@ static std::optional<Move> aiChooseMove(const std::vector<int>& hand, int le, in
         }
 
         if (noise) s += rng.nextDouble() * 5.0;
-        if (s > bestScore) { bestScore = s; best = &m; }
+        if (s > bestScore) { bestScore = s; bestIdx = mi; }
     }
-    return *best;
+    // Penjaga: tanpa ini, bestIdx yang tetap -1 akan jadi akses di luar batas.
+    // (Versi lama memakai pointer `*best` dengan risiko null-deref yang sama.)
+    if (bestIdx < 0) return std::nullopt;
+    return movesBuf[bestIdx];
 }
 
 // ---------------------------------------------------------------------------
@@ -633,7 +705,6 @@ struct SimResult {
     int tilesTotal = 0;   // hands + boneyard (unplayed tiles)
     int onBoard = 0;      // tiles played onto the chain during the sim
     int drawsMade = 0;    // cangkul draws taken during the sim
-    std::vector<int> boneyardFinal; // tiles still dead when the sim ended
     bool conserved = false; // tilesTotal + onBoard == tiles at deal time
 };
 
@@ -655,16 +726,49 @@ static bool settleByValue(int myVal, const std::vector<int>& oppVals,
     return tieWin; // equal
 }
 
-static SimResult simulateGame(const std::vector<int>& myHandIn, int leIn, int reIn,
-                              int numPlayers, const Deal& deal, Rng& rng,
-                              const NumMap& baseMap, int nextSeat,
-                              const std::vector<AiStyle>& styles, int tightOppIdx,
-                              const std::string& deadlockRule, bool tieWin, bool cangkul) {
+// Buffer yang dipakai ulang antar-simulasi. Tanpa ini, satu permintaan 50 rb
+// simulasi x beberapa kandidat langkah melakukan puluhan juta malloc/free —
+// itulah biaya terbesar hot loop (bukan aritmetikanya).
+struct SimScratch {
+    std::vector<int> myH;
+    std::vector<std::vector<int>> oppHands;
+    std::vector<int> bone;
     SimResult res;
+};
+
+// Hasil ditulis ke `sc.res` (kapasitas vektor dipertahankan) — pemanggil
+// membacanya sebelum simulasi berikutnya dimulai.
+static void simulateGame(SimScratch& sc, const std::vector<int>& myHandIn, int leIn, int reIn,
+                         int numPlayers, const Deal& deal, Rng& rng,
+                         const NumMap& baseMap, int nextSeat,
+                         const std::array<AiStyle, 4>& styles, int tightOppIdx,
+                         const std::string& deadlockRule, bool tieWin, bool cangkul) {
+    SimResult& res = sc.res;
+    // clear(): membuang isi TANPA melepas kapasitas (beda dengan `res = SimResult{}`
+    // yang akan membebaskan memori dan mengembalikan masalah alokasi).
+    res.iWin = false; res.myTiles = 0; res.myVal = 0; res.blocked = false;
+    res.dominanceControl = 0; res.tilesTotal = 0; res.onBoard = 0;
+    res.drawsMade = 0; res.conserved = false;
+    res.oppVals.clear();
+    res.oppMoveIds.clear();
+    res.oppPassCounts.clear();
+
     int numOpp = numPlayers - 1;
-    std::vector<int> myH = myHandIn;
-    std::vector<std::vector<int>> oppHands = deal.oppHands;
-    std::vector<int> bone = deal.boneyard;
+    sc.myH.assign(myHandIn.begin(), myHandIn.end());
+    sc.oppHands.resize(deal.oppHands.size());
+    for (size_t k = 0; k < deal.oppHands.size(); ++k)
+        sc.oppHands[k].assign(deal.oppHands[k].begin(), deal.oppHands[k].end());
+    sc.bone.assign(deal.boneyard.begin(), deal.boneyard.end());
+    std::vector<int>& myH = sc.myH;
+    std::vector<std::vector<int>>& oppHands = sc.oppHands;
+    std::vector<int>& bone = sc.bone;
+
+    // Cache dominasi per lawan: dominasi hanya bergantung pada tangan lawan,
+    // jadi cukup dihitung ulang saat tangan itu benar-benar berubah (main/gambar).
+    std::array<Dominance, 4> oppDom{};
+    std::array<bool, 4> oppDomDirty{};
+    for (bool& d : oppDomDirty) d = true;
+
     int le = leIn, re = reIn;
     int passes = 0;
     int cur = (nextSeat >= 0 && nextSeat < numPlayers) ? nextSeat : 1;
@@ -687,9 +791,7 @@ static SimResult simulateGame(const std::vector<int>& myHandIn, int leIn, int re
         res.tilesTotal = static_cast<int>(myH.size());
         for (const auto& h : oppHands) res.tilesTotal += static_cast<int>(h.size());
         res.tilesTotal += static_cast<int>(bone.size());
-        res.boneyardFinal = bone;
         res.conserved = (res.tilesTotal + res.onBoard == tilesAtDeal);
-        return res;
     };
 
     int turn = 0;
@@ -720,8 +822,9 @@ static SimResult simulateGame(const std::vector<int>& myHandIn, int leIn, int re
                 nm.mine[t.a]--; nm.mine[t.b]--;
                 nm.out[t.a]++;  nm.out[t.b]++;
                 for (int n = 0; n <= 6; ++n) nm.unk[n] = 7 - nm.mine[n] - nm.out[n];
-                for (const auto& d : myDom.dominant)
-                    if (le == d.first || re == d.first) res.dominanceControl++;
+                for (int k = 0; k < myDom.nDominant; ++k)
+                    if (le == myDom.dominant[k].first || re == myDom.dominant[k].first)
+                        res.dominanceControl++;
                 ++res.onBoard;
             } else {
                 ++passes;
@@ -730,10 +833,12 @@ static SimResult simulateGame(const std::vector<int>& myHandIn, int leIn, int re
             int oi = cur - 1;
             if (oi < static_cast<int>(oppHands.size())) {
                 bool tight = (oi == tightOppIdx);
-                AiStyle st = tight ? AiStyle::BLOCKER
-                                   : (oi < static_cast<int>(styles.size())
-                                          ? styles[oi] : AiStyle::MIXED);
-                Dominance od = analyzeDominance(oppHands[oi]);
+                AiStyle st = tight ? AiStyle::BLOCKER : styles[oi];
+                Dominance& od = oppDom[oi];
+                if (oppDomDirty[oi]) {
+                    od = analyzeDominance(oppHands[oi]);
+                    oppDomDirty[oi] = false;
+                }
                 auto mv = aiChooseMove(oppHands[oi], le, re, od, nm, rng, st, !tight);
                 if (!mv && cangkul && !bone.empty()) {
                     while (!mv && !bone.empty()) {
@@ -742,6 +847,7 @@ static SimResult simulateGame(const std::vector<int>& myHandIn, int leIn, int re
                         bone[idx] = bone.back(); bone.pop_back();
                         ++res.drawsMade;
                         oppHands[oi].push_back(id);
+                        oppDomDirty[oi] = true; // tangan berubah -> cache tak valid lagi
                         mv = aiChooseMove(oppHands[oi], le, re, od, nm, rng, st, !tight);
                     }
                 }
@@ -749,6 +855,7 @@ static SimResult simulateGame(const std::vector<int>& myHandIn, int leIn, int re
                     const Tile& t = g_tiles[mv->tileId];
                     AppliedMove ap = applyMove(oppHands[oi], *mv, le, re);
                     oppHands[oi] = ap.hand;
+                    oppDomDirty[oi] = true; // tangan berubah -> cache tak valid lagi
                     le = ap.le; re = ap.re;
                     passes = 0;
                     nm.unk[t.a]--; nm.unk[t.b]--;
@@ -767,15 +874,15 @@ static SimResult simulateGame(const std::vector<int>& myHandIn, int leIn, int re
         if (myH.empty()) {
             finish(true);
             res.myTiles = 0; res.myVal = 0;
-            return res;
+            return;
         }
         for (const auto& h : oppHands) {
-            if (h.empty()) { finish(false); return res; }
+            if (h.empty()) { finish(false); return; }
         }
         if (passes >= numPlayers) {
             res.blocked = true;
             finish(settleByValue(handValue(myH), res.oppVals, deadlockRule, tieWin));
-            return res;
+            return;
         }
         cur = (cur + 1) % numPlayers;
     }
@@ -783,7 +890,71 @@ static SimResult simulateGame(const std::vector<int>& myHandIn, int leIn, int re
     // Turn cap reached: settle by pip value (same rules as deadlock).
     res.blocked = true;
     finish(settleByValue(handValue(myH), res.oppVals, deadlockRule, tieWin));
-    return res;
+}
+
+// ---------------------------------------------------------------------------
+// Akumulator satu blok simulasi
+// ---------------------------------------------------------------------------
+// Semua agregasi memakai penjumlahan bilangan bulat, jadi hasilnya tidak
+// bergantung urutan blok: mode paralel menghasilkan angka identik dengan mode
+// sekuensial (dibuktikan tools/audit_golden.py).
+struct SimAccum {
+    long long wins = 0, losses = 0, winByEmpty = 0, winByValue = 0;
+    long long deadlockWins = 0, blockedGames = 0;
+    long long totalMyVal = 0, totalOppMinVal = 0, totalDomControl = 0, totalOppPasses = 0;
+    long long totalDraws = 0;
+    std::array<long long, 28> dangerCnt{};
+    bool conserved = true;
+
+    void add(const SimResult& sim) {
+        if (!sim.conserved) conserved = false;
+        if (sim.iWin) {
+            ++wins;
+            if (sim.myTiles == 0) ++winByEmpty;
+            else {
+                ++winByValue;
+                if (sim.blocked) ++deadlockWins;
+            }
+        } else {
+            ++losses;
+            for (int id : sim.oppMoveIds) dangerCnt[id]++;
+        }
+        totalDraws += sim.drawsMade;
+        totalMyVal += sim.myVal;
+        if (sim.blocked) ++blockedGames;
+        if (!sim.oppVals.empty())
+            totalOppMinVal += *std::min_element(sim.oppVals.begin(), sim.oppVals.end());
+        totalDomControl += sim.dominanceControl;
+        for (int c : sim.oppPassCounts) totalOppPasses += c;
+    }
+
+    void merge(const SimAccum& o) {
+        wins += o.wins; losses += o.losses; winByEmpty += o.winByEmpty;
+        winByValue += o.winByValue; deadlockWins += o.deadlockWins;
+        blockedGames += o.blockedGames; totalMyVal += o.totalMyVal;
+        totalOppMinVal += o.totalOppMinVal; totalDomControl += o.totalDomControl;
+        totalOppPasses += o.totalOppPasses; totalDraws += o.totalDraws;
+        for (int i = 0; i < 28; ++i) dangerCnt[i] += o.dangerCnt[i];
+        conserved = conserved && o.conserved;
+    }
+};
+
+// Jumlah thread untuk menjalankan simulasi.
+//   DOMINO_THREADS tidak diset  -> semua inti logis (dibatasi 32)
+//   DOMINO_THREADS=1            -> sekuensial (jalur lama, paling mudah diperiksa)
+static int engineThreads() {
+    static const int n = [] {
+        const char* env = std::getenv("DOMINO_THREADS");
+        if (env && *env) {
+            int v = std::atoi(env);
+            if (v <= 0) return 1;
+            return v > 64 ? 64 : v;
+        }
+        unsigned hc = std::thread::hardware_concurrency();
+        if (hc == 0) return 1;
+        return static_cast<int>(hc > 32 ? 32 : hc);
+    }();
+    return n;
 }
 
 // ---------------------------------------------------------------------------
@@ -826,7 +997,8 @@ static Heuristics computeHeuristics(const Move& move, int newLeft, int newRight,
     Heuristics h;
 
     // dominance support
-    for (const auto& d : dom.dominant) {
+    for (int k = 0; k < dom.nDominant; ++k) {
+        const std::pair<int, int>& d = dom.dominant[k];
         if (newLeft == d.first || newRight == d.first) {
             h.domSupportScore += 20;
             h.domSupportReasons.push_back("Ujung cocok angka dominan " + std::to_string(d.first) +
@@ -837,7 +1009,8 @@ static Heuristics computeHeuristics(const Move& move, int newLeft, int newRight,
             h.domSupportReasons.push_back("🏆 KEDUA UJUNG dikuasai angka " + std::to_string(d.first) + "!");
         }
     }
-    for (const auto& st : dom.strong) {
+    for (int k = 0; k < dom.nStrong; ++k) {
+        const std::pair<int, int>& st = dom.strong[k];
         if (newLeft == st.first || newRight == st.first) {
             h.domSupportScore += 8;
             h.domSupportReasons.push_back("Ujung cocok angka kuat " + std::to_string(st.first));
@@ -845,7 +1018,8 @@ static Heuristics computeHeuristics(const Move& move, int newLeft, int newRight,
     }
 
     // traps
-    for (const auto& d : dom.dominant) {
+    for (int k = 0; k < dom.nDominant; ++k) {
+        const std::pair<int, int>& d = dom.dominant[k];
         bool onLeft = (newLeft == d.first), onRight = (newRight == d.first);
         if (onLeft || onRight) {
             int unknownD = mapAfter.unk[d.first];
@@ -1012,7 +1186,10 @@ static std::string runAnalyze(const JValue& req) {
     // lalu ke int — cegah DoS CPU walau server lupa memvalidasi.
     double numSimsD = req.at("numSims").asNum(1000);
     if (!(numSimsD >= 1.0)) numSimsD = 1.0;
-    else if (numSimsD > 2000000.0) numSimsD = 2000000.0; // cakup 99% ±0,1% (1.664.100); 166 jt tidak feasible per-request
+    // Batas atas 1.700.000 (≈95% ±0,1%): tier terberat yang masih bisa
+    // diselesaikan jauh di bawah timeout server, dan tetap menjadi pengaman
+    // anti-DoS terakhir kalau server lupa memvalidasi.
+    else if (numSimsD > 1700000.0) numSimsD = 1700000.0;
     int numSims = static_cast<int>(numSimsD);
     unsigned long long seed = static_cast<unsigned long long>(req.at("seed").asNum(42));
     int le = req.at("leftEnd").asInt(-1);
@@ -1178,6 +1355,13 @@ static std::string runAnalyze(const JValue& req) {
     Rng master(seed);
     int firstResponder = (nextSeat > 0) ? nextSeat - 1 : -1;
 
+    // Scratch di luar loop simulasi: seluruh kerja berat memakai ulang buffer,
+    // jadi hot loop tidak lagi mengalokasi memori per simulasi.
+    DealScratch dealSc;
+    Deal deal;
+    SimScratch simSc;
+    const int tightIdx = adversarial ? firstResponder : -1;
+
     std::vector<std::pair<double, std::string>> moveOuts;
 
     for (size_t mi = 0; mi < validMoves.size(); ++mi) {
@@ -1203,45 +1387,92 @@ static std::string runAnalyze(const JValue& req) {
         // ---- Monte Carlo ----
         NumMap simBase = mapAfter;
 
-        int wins = 0, winByEmpty = 0, winByValue = 0, deadlockWins = 0, blockedGames = 0;
-        long long totalMyVal = 0, totalOppMinVal = 0, totalDomControl = 0, totalOppPasses = 0;
-        std::array<long long, 28> dangerCnt{};
-        std::array<long long, 28> deadCnt{}; // boneyard-membership frequency (v3.1)
-        long long losses = 0;
-        bool conserved = true;
-        long long totalDraws = 0;
+        SimAccum acc;
+        const int nThreads = engineThreads();
+        // Ambang 2000 sim: di bawah itu biaya membuat thread lebih besar dari
+        // manfaatnya, jadi tetap sekuensial.
+        const bool parallel = nThreads > 1 && numSims >= 2000;
 
-        for (int s = 0; s < numSims; ++s) {
-            Deal deal = dealConstrained(unknown, numOpp, totalOppCards, dealElim, held, master);
-            Rng gameRng(master.next());
-            // rotate opponent styles across sims so all profiles get represented
-            std::vector<AiStyle> styles(numOpp);
-            for (int p = 0; p < numOpp; ++p)
-                styles[p] = static_cast<AiStyle>(1 + ((s + p) % 3));
-            int tightIdx = adversarial ? firstResponder : -1;
-            SimResult sim = simulateGame(nH, nL, nR, numPlayers, deal, gameRng, simBase,
-                                         nextSeat, styles, tightIdx, deadlockRule, tieWin, cangkul);
-            if (!sim.conserved) conserved = false;
-            if (sim.iWin) {
-                ++wins;
-                if (sim.myTiles == 0) ++winByEmpty;
-                else {
-                    ++winByValue;
-                    if (sim.blocked) ++deadlockWins;
-                }
-            } else {
-                ++losses;
-                for (int id : sim.oppMoveIds) dangerCnt[id]++;
+        if (!parallel) {
+            for (int s = 0; s < numSims; ++s) {
+                std::array<AiStyle, 4> styles{};
+                dealConstrained(unknown, numOpp, totalOppCards, dealElim, held, master, dealSc, deal);
+                Rng gameRng(master.next());
+                // rotate opponent styles across sims so all profiles get represented
+                for (int p = 0; p < numOpp; ++p)
+                    styles[p] = static_cast<AiStyle>(1 + ((s + p) % 3));
+                simulateGame(simSc, nH, nL, nR, numPlayers, deal, gameRng, simBase,
+                             nextSeat, styles, tightIdx, deadlockRule, tieWin, cangkul);
+                acc.add(simSc.res);
             }
-            for (int id : sim.boneyardFinal) deadCnt[id]++;
-            totalDraws += sim.drawsMade;
-            totalMyVal += sim.myVal;
-            if (sim.blocked) ++blockedGames;
-            if (!sim.oppVals.empty())
-                totalOppMinVal += *std::min_element(sim.oppVals.begin(), sim.oppVals.end());
-            totalDomControl += sim.dominanceControl;
-            for (int c : sim.oppPassCounts) totalOppPasses += c;
+        } else {
+            // Stream RNG `master` tetap satu urutan: setiap simulasi memakai tepat
+            // `unknown.size()` undian dari master (shuffle sisa pool + 1 seed gim),
+            // jadi state awal tiap blok bisa direkam dengan satu lintasan
+            // sekuensial lalu tiap blok dijalankan paralel dari snapshot-nya.
+            // Efeknya: angka yang dihasilkan PERSIS sama dengan mode 1 thread.
+            const int drawsPerSim = static_cast<int>(unknown.size() < 2 ? 1 : unknown.size());
+            const int block = std::max(1, (numSims + nThreads - 1) / nThreads);
+            const int nBlocks = (numSims + block - 1) / block;
+            // Rng tidak punya konstruktor default (seed wajib), jadi snapshot
+            // dibangun dengan push_back, bukan vector(n).
+            std::vector<Rng> snaps;
+            snaps.reserve(static_cast<size_t>(nBlocks));
+            Rng walk = master;
+            for (int bi = 0; bi < nBlocks; ++bi) {
+                snaps.push_back(walk);
+                const int from = bi * block;
+                const int to = std::min(numSims, from + block);
+                for (int k = from; k < to; ++k)
+                    for (int d = 0; d < drawsPerSim; ++d) walk.next();
+            }
+            master = walk; // lanjutkan urutan stream untuk langkah berikutnya
+
+            std::vector<SimAccum> part(static_cast<size_t>(nBlocks));
+            std::vector<std::thread> workers;
+            std::atomic<bool> failed{false};
+            workers.reserve(static_cast<size_t>(nBlocks));
+            for (int bi = 0; bi < nBlocks; ++bi) {
+                workers.emplace_back([&, bi] {
+                    try {
+                        DealScratch dsc;
+                        Deal d;
+                        SimScratch sc;
+                        Rng local = snaps[static_cast<size_t>(bi)];
+                        const int from = bi * block;
+                        const int to = std::min(numSims, from + block);
+                        SimAccum localAcc;
+                        for (int s = from; s < to; ++s) {
+                            std::array<AiStyle, 4> styles{};
+                            dealConstrained(unknown, numOpp, totalOppCards, dealElim, held,
+                                            local, dsc, d);
+                            Rng gameRng(local.next());
+                            for (int p = 0; p < numOpp; ++p)
+                                styles[p] = static_cast<AiStyle>(1 + ((s + p) % 3));
+                            simulateGame(sc, nH, nL, nR, numPlayers, d, gameRng, simBase,
+                                         nextSeat, styles, tightIdx, deadlockRule, tieWin, cangkul);
+                            localAcc.add(sc.res);
+                        }
+                        part[static_cast<size_t>(bi)] = localAcc;
+                    } catch (...) {
+                        failed.store(true);
+                    }
+                });
+            }
+            for (auto& t : workers) t.join();
+            if (failed.load()) throw std::runtime_error("simulasi paralel gagal");
+            for (int bi = 0; bi < nBlocks; ++bi) acc.merge(part[static_cast<size_t>(bi)]);
         }
+
+        // Alias baca-saja: sisa perhitungan di bawah tidak berubah sama sekali.
+        const long long wins = acc.wins, losses = acc.losses;
+        const long long winByEmpty = acc.winByEmpty, winByValue = acc.winByValue;
+        const long long deadlockWins = acc.deadlockWins, blockedGames = acc.blockedGames;
+        const long long totalMyVal = acc.totalMyVal, totalOppMinVal = acc.totalOppMinVal;
+        const long long totalDomControl = acc.totalDomControl, totalOppPasses = acc.totalOppPasses;
+        const long long totalDraws = acc.totalDraws;
+        const std::array<long long, 28>& dangerCnt = acc.dangerCnt;
+        const bool conserved = acc.conserved;
 
         // risk score from most frequent opponent tiles in lost sims
         std::vector<std::pair<int, long long>> danger;
@@ -1362,9 +1593,11 @@ static std::string runAnalyze(const JValue& req) {
         std::array<long long, 28> deadAgg{};
         std::array<long long, 7> deadNumAgg{};
         int deadSims = std::min(numSims, 2000);
+        DealScratch deadSc;
+        Deal deadDeal;
         for (int s = 0; s < deadSims; ++s) {
-            Deal deal = dealConstrained(unknown, numOpp, totalOppCards, dealElim, held, master);
-            for (int id : deal.boneyard) { deadAgg[id]++; }
+            dealConstrained(unknown, numOpp, totalOppCards, dealElim, held, master, deadSc, deadDeal);
+            for (int id : deadDeal.boneyard) { deadAgg[id]++; }
         }
         std::vector<std::pair<int, double>> dead;
         for (int id = 0; id < 28; ++id)
@@ -1495,7 +1728,9 @@ static std::string runSelftest() {
                 }
             }
 
-            Deal deal = dealConstrained(unknown, numOpp, totalOppCards, elim, held, rng);
+            DealScratch dealSc;
+            Deal deal;
+            dealConstrained(unknown, numOpp, totalOppCards, elim, held, rng, dealSc, deal);
 
             std::vector<int> cnt(28, 0);
             for (const auto& h : deal.oppHands)
@@ -1543,13 +1778,18 @@ static std::string runSelftest() {
             elim[0] = {6};
             elim[1] = {0, 1};
             int wins = 0;
+            DealScratch dealSc;
+            Deal deal;
+            SimScratch simSc;
+            const std::array<AiStyle, 4> styles = {AiStyle::BLOCKER, AiStyle::HOARDER,
+                                                   AiStyle::DUMPER, AiStyle::MIXED};
             for (int s = 0; s < 500 && pass; ++s) {
-                Deal deal = dealConstrained(unknown, 3, 14, elim, held, rng);
+                dealConstrained(unknown, 3, 14, elim, held, rng, dealSc, deal);
                 Rng gameRng(rng.next());
                 NumMap base = buildNumMap(myHand, {});
-                std::vector<AiStyle> styles = {AiStyle::BLOCKER, AiStyle::HOARDER, AiStyle::DUMPER};
-                SimResult sim = simulateGame(myHand, 3, 5, 4, deal, gameRng, base, 1, styles, -1,
-                                             "lowest", true, true);
+                simulateGame(simSc, myHand, 3, 5, 4, deal, gameRng, base, 1, styles, -1,
+                             "lowest", true, true);
+                const SimResult& sim = simSc.res;
                 if (sim.myTiles == 0 && sim.myVal != 0) pass = false;
                 if (!sim.conserved) { pass = false; detail = "konservasi tile dalam sim gagal"; }
                 if (sim.iWin) ++wins;
@@ -1571,15 +1811,19 @@ static std::string runSelftest() {
             for (int id = 0; id < 28; ++id)
                 if (std::find(myHand.begin(), myHand.end(), id) == myHand.end()) unknown.push_back(id);
             std::vector<std::vector<int>> elim(1), held(1);
+            DealScratch dealSc;
+            Deal deal;
+            SimScratch simSc;
+            const std::array<AiStyle, 4> styles = {AiStyle::MIXED, AiStyle::MIXED,
+                                                   AiStyle::MIXED, AiStyle::MIXED};
             for (int s = 0; s < 200 && pass; ++s) {
-                Deal deal = dealConstrained(unknown, 1, 7, elim, held, rng);
+                dealConstrained(unknown, 1, 7, elim, held, rng, dealSc, deal);
                 if (deal.boneyard.size() != 14) { pass = false; detail = "boneyard != 14"; break; }
                 Rng gameRng(rng.next());
                 NumMap base = buildNumMap(myHand, {});
-                std::vector<AiStyle> styles = {AiStyle::MIXED};
-                SimResult sim = simulateGame(myHand, -1, -1, 2, deal, gameRng, base, 1, styles, -1,
-                                             "lowest", true, true);
-                if (!sim.conserved) { pass = false; detail = "konservasi cangkul gagal"; }
+                simulateGame(simSc, myHand, -1, -1, 2, deal, gameRng, base, 1, styles, -1,
+                             "lowest", true, true);
+                if (!simSc.res.conserved) { pass = false; detail = "konservasi cangkul gagal"; }
             }
         } catch (const std::exception& e) { pass = false; detail = e.what(); }
         checks.push_back({"boneyard_konservasi", pass, detail});
@@ -1653,23 +1897,29 @@ static std::string runSelftest() {
                 if (std::find(myHand.begin(), myHand.end(), id) == myHand.end()) unknown.push_back(id);
             std::vector<std::vector<int>> elim(1), held(1);
             NumMap base = buildNumMap(myHand, {});
-            std::vector<AiStyle> styles = {AiStyle::MIXED};
+            const std::array<AiStyle, 4> styles = {AiStyle::MIXED, AiStyle::MIXED,
+                                                   AiStyle::MIXED, AiStyle::MIXED};
+            DealScratch dealSc;
+            Deal deal;
+            SimScratch simSc;
 
-            Deal deal = dealConstrained(unknown, 1, 7, elim, held, rng);
+            dealConstrained(unknown, 1, 7, elim, held, rng, dealSc, deal);
             Rng gameRng(rng.next());
-            SimResult sim = simulateGame(myHand, -1, -1, 2, deal, gameRng, base, 1, styles, -1,
-                                         "lowest", true, false);
-            if (sim.drawsMade != 0) { pass = false; detail = "cangkul=false tapi ada nyamber"; }
-            if (!sim.conserved) { pass = false; detail = "konservasi gagal (tanpa cangkul)"; }
+            simulateGame(simSc, myHand, -1, -1, 2, deal, gameRng, base, 1, styles, -1,
+                         "lowest", true, false);
+            const int drawsNoCangkul = simSc.res.drawsMade;
+            const bool conservedNoCangkul = simSc.res.conserved;
+            if (drawsNoCangkul != 0) { pass = false; detail = "cangkul=false tapi ada nyamber"; }
+            if (!conservedNoCangkul) { pass = false; detail = "konservasi gagal (tanpa cangkul)"; }
 
             int totalDraws = 0;
             for (int s = 0; s < 100 && pass; ++s) {
-                Deal d2 = dealConstrained(unknown, 1, 7, elim, held, rng);
+                dealConstrained(unknown, 1, 7, elim, held, rng, dealSc, deal);
                 Rng grng(rng.next());
-                SimResult s2 = simulateGame(myHand, -1, -1, 2, d2, grng, base, 1, styles, -1,
-                                            "lowest", true, true);
-                totalDraws += s2.drawsMade;
-                if (!s2.conserved) { pass = false; detail = "konservasi gagal (dengan cangkul)"; }
+                simulateGame(simSc, myHand, -1, -1, 2, deal, grng, base, 1, styles, -1,
+                             "lowest", true, true);
+                totalDraws += simSc.res.drawsMade;
+                if (!simSc.res.conserved) { pass = false; detail = "konservasi gagal (dengan cangkul)"; }
             }
             if (pass && totalDraws == 0) detail += " (info: 100 gim tanpa satu pun nyamber)";
         } catch (const std::exception& e) { pass = false; detail = e.what(); }
